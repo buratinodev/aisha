@@ -35,6 +35,72 @@ Perfect for:
   - **deep**: Step-by-step reasoning with edge case analysis
 
 ## Installation
+
+### Automatic Installation
+
+1. Clone or download this repository:
+   ```bash
+   git clone https://github.com/buratinodev/airc.git
+   cd airc
+   ```
+
+2. Run the installer:
+   ```bash
+   ./airc.sh --install
+   ```
+
+   This will:
+   - Copy `airc.sh` to `~/.airc`
+   - Detect your shell (bash or zsh)
+   - Add the loader to your `~/.bashrc` or `~/.zshrc`
+   - Display instructions for activating
+
+3. Load airc in your current shell:
+   ```bash
+   source ~/.zshrc  # or source ~/.bashrc for bash users
+   ```
+
+   Or simply open a new terminal window.
+
+### Manual Installation
+
+If you prefer to install manually or need to customize the installation:
+
+1. Copy the script to your home directory:
+   ```bash
+   cp airc.sh ~/.airc
+   ```
+
+2. Add to your shell configuration file (`~/.bashrc` or `~/.zshrc`):
+   ```bash
+   # Load AI shell helpers
+   if [[ -f "$HOME/.airc" ]]; then
+     source "$HOME/.airc"
+   fi
+   ```
+
+3. Reload your shell configuration:
+   ```bash
+   source ~/.zshrc  # or source ~/.bashrc
+   ```
+
+### Prerequisites
+
+You need the `llm` CLI tool with a configured model:
+
+1. Install `llm`:
+   ```bash
+   pip install llm
+   ```
+
+2. Install the Ollama plugin and pull the model:
+   ```bash
+   llm install llm-ollama
+   ollama pull qwen2.5-coder:14b
+   ```
+
+   Or modify the script to use a different model by changing `llm -m qwen2.5-coder:14b` to your preferred model.
+
 ## Usage
 
 ### Basic Command Suggestions
@@ -176,18 +242,6 @@ ai --deep migrate database from postgres to mysql
 5. Confirms before execution (stricter for risky commands)
 6. Executes and saves output
 
-## Safety Features
-
-- **Hard block** on `rm -rf`
-- **Strict confirmation** (must type "YES") for:
-  - sudo commands
-  - rm operations
-  - dd, mkfs
-  - kubectl delete
-  - terraform apply/destroy
-  - gcloud delete
-- **Standard confirmation** (Y/n) for all other commands
-
 ## File Structure
 
 ```
@@ -209,9 +263,24 @@ ai --deep migrate database from postgres to mysql
 Edit the `llm -m qwen2.5-coder:14b` calls in the script to use your preferred model.
 
 ### Adjust Safety Rules
-Modify the regex patterns in the script:
-- Hard blocks: Line ~119
-- Risky command detection: Line ~140
+Modify the risky command detection regex in the `_ai_confirm_and_run` function to add or remove patterns.
+
+### Customize Colors
+Change the color definitions at the top of the script:
+```bash
+COLOR_RED="\033[1;31m"
+COLOR_GREEN="\033[1;32m"
+COLOR_YELLOW="\033[1;33m"
+COLOR_CYAN="\033[1;36m"
+COLOR_RESET="\033[0m"
+```
+
+Set them to empty strings to disable colors:
+```bash
+COLOR_RED=""
+COLOR_GREEN=""
+# ... etc
+```
 
 ### Add Custom Personas
 Add new persona modes by extending the persona flag logic around line 52.
