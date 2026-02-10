@@ -47,6 +47,13 @@ if [[ "$1" == "--install" ]]; then
 fi
 
 # ---- AI helper (llm wrapper with memory + risk confirmation) ----
+ai() {
+  local tmpdir="/tmp/ai"           # Stores last command, prompt, persona, and output for redo/explain
+  local ctxdir="$tmpdir/last_context" # Stores shell context (history, pwd, git status, exit code) sent to the LLM
+  mkdir -p "$tmpdir" "$ctxdir"
+
+  local persona="sysadmin"
+
   # ---- Special commands ----
   if [[ "$1" == "redo" ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
@@ -68,13 +75,6 @@ fi
   if [[ "$1" == "explain" ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
       echo -e "${COLOR_RED}No previous AI suggestion to explain.${COLOR_RESET}"
-      return 1
-    fiturn $?
-  fi
-
-  if [[ "$1" == "explain" ]]; then
-    if [[ ! -f "$tmpdir/last_command.txt" ]]; then
-      echo -e "\033[1;31mNo previous AI suggestion to explain.\033[0m"
       return 1
     fi
 
@@ -161,6 +161,13 @@ Suggest ONE safe shell command to accomplish:
 '$prompt'
 
 Rules:
+- Never use rm -rf
+- Avoid destructive commands
+- Output ONLY the command.")
+
+  # ---- Strip markdown code blocks ----
+  response=$(echo "$response" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
+
   # ---- Persist memory ----
   echo "$response" > "$tmpdir/last_command.txt"
   echo "$prompt" > "$tmpdir/last_prompt.txt"
@@ -169,13 +176,6 @@ Rules:
   echo
   echo -e "${COLOR_CYAN}Suggested command:${COLOR_RESET}"
   echo -e "  ${COLOR_YELLOW}$response${COLOR_RESET}"
-  echo
-
-  _ai_confirm_and_run "$response"
-}
-  echo
-  echo -e "\033[1;36mSuggested command:\033[0m"
-  echo -e "  \033[1;33m$response\033[0m"
   echo
 
   _ai_confirm_and_run "$response"
