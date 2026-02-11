@@ -1,4 +1,4 @@
-# aisha - AI-powered) Shell Assistant
+# aisha - AI(-powered) Shell Assistant
 
 A bash/zsh shell function that wraps LLM (via `llm` CLI) to provide intelligent command suggestions with safety checks and context awareness.
 
