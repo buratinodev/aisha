@@ -135,7 +135,10 @@ ai what is a symlink?
 # A symlink (symbolic link) is a file that points to another file or directory...
 ```
 
-> **Note**: You can use special characters like `?` and `*` without quoting - airc handles them automatically in zsh.
+> **Note (zsh)**: Special characters like `?`, `*`, and apostrophes work without quoting.
+> airc enables `nonomatch` for glob characters, and a ZLE widget transparently replaces `'` with a
+> visually identical Unicode apostrophe (`ʼ` U+02BC) so shell parsing isn't broken.
+> If the shell still eats your arguments, airc falls back to an interactive `Ask:` prompt.
 
 ### Risky Command Handling
 
@@ -301,6 +304,16 @@ ai --deep migrate database from postgres to mysql
 - **Risky commands**: Type anything except "YES" to abort
 - **Anytime**: Press `Ctrl+C` to abort immediately
 
+## Zsh Integration
+
+When running in zsh, airc enables two quality-of-life features:
+
+- **`setopt nonomatch`** — Glob characters (`?`, `*`) are passed literally instead of causing errors, so you can type `ai what?` without quoting.
+- **ZLE apostrophe widget** — A lightweight `accept-line` widget detects lines starting with `ai ` that contain `'` and replaces them with the visually identical Unicode right single quotation mark (`ʼ` U+02BC). This prevents the shell from interpreting the apostrophe as an unterminated single quote. Your history stays clean: `ai whatʼs cooking?`.
+- **Interactive fallback** — If the shell still consumes your arguments (edge cases), airc detects the empty prompt and presents an `Ask:` prompt so you can type your question interactively.
+
+These features are invisible in normal use — just type naturally.
+
 ## How It Works
 
 1. Detects your OS at startup (e.g., `Darwin/arm64 macOS 15.3`)
@@ -319,7 +332,7 @@ ai --deep migrate database from postgres to mysql
 ```
 /tmp/ai/
 ├── last_command.txt    # Last suggested command
-├── last_prompt.txt     # Original user intent
+├── last_prompt.txt     # Original user intent (passed to LLM via -f)
 ├── last_persona.txt    # Persona used (sysadmin/deep)
 ├── last_output.txt     # Output from last execution
 ├── last_context/
@@ -328,12 +341,15 @@ ai --deep migrate database from postgres to mysql
 │   ├── git.txt         # Git status
 │   └── exit.txt        # Last exit code
 └── agent/              # Agent mode state
+    ├── goal.txt            # Agent goal (passed to LLM via -f)
+    ├── mode.txt            # Agent mode (auto/safe)
+    ├── history_context.txt # Rolling context (last 5 steps, truncated)
+    ├── agent_log.txt       # Cumulative log
     └── checkpoints/
-        ├── step_001.json   # Per-step metadata
-        ├── step_001.out    # Step output
-        ├── step_002.json
-        ├── step_002.out
-        └── agent_log.txt   # Cumulative log
+        ├── step_1.json         # Per-step metadata
+        ├── step_1_output.txt   # Step output
+        ├── step_2.json
+        └── step_2_output.txt
 ```
 
 ## Customization
@@ -395,7 +411,8 @@ Add new persona modes by extending the persona flag logic around line 52.
 - bash or zsh shell
 - `llm` CLI tool with `llm-ollama` plugin
 - Two LLM models via Ollama (defaults: `qwen3-coder:30b` for tasks, `qwen3:32b` for thinking)
-- Basic Unix tools: `grep`, `tee`, `mkdir`, `cat`
+- Basic Unix tools: `grep`, `tee`, `mkdir`, `cat`, `sed`
+- `python3` (used for JSON escaping in agent checkpoints)
 
 ## License
 

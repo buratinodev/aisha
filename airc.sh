@@ -99,14 +99,11 @@ _ai() {
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
       -f "$ctxdir/exit.txt" \
+      -f "$tmpdir/last_command.txt" \
+      -f "$tmpdir/last_prompt.txt" \
       "You are an expert sysadmin. The user's OS is: $AI_OS
-Explain why this command was suggested, what it does, and any risks.
-
-Command:
-$(cat "$tmpdir/last_command.txt")
-
-Original intent:
-$(cat "$tmpdir/last_prompt.txt")"
+Explain why the command in last_command.txt was suggested, what it does, and any risks.
+The original user intent is in last_prompt.txt."
     return
   fi
 
@@ -131,6 +128,9 @@ $(cat "$tmpdir/last_prompt.txt")"
 
   local prompt="$*"
 
+  # ---- Save prompt to file (avoids shell quoting issues with apostrophes etc.) ----
+  [[ -n "$prompt" ]] && echo "$prompt" > "$tmpdir/last_prompt.txt"
+
   # ---- Capture context ----
   fc -l -15 > "$ctxdir/history.txt" 2>/dev/null
   pwd > "$ctxdir/pwd.txt"
@@ -138,6 +138,31 @@ $(cat "$tmpdir/last_prompt.txt")"
 
   local last_exit=$?
   echo "Last exit code: $last_exit" > "$ctxdir/exit.txt"
+
+  # ---- Auto-fix failed command (empty prompt + nonzero exit) ----
+  if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
+    local system_prompt_fix="You are a senior systems engineer. The user's OS is: $AI_OS
+Think step-by-step, consider edge cases, tradeoffs, and failure modes.
+Prefer correctness over speed."
+    llm -m "$AI_MODEL_THINKING" \
+      -f "$ctxdir/history.txt" \
+      -f "$ctxdir/pwd.txt" \
+      -f "$ctxdir/git.txt" \
+      -f "$ctxdir/exit.txt" \
+      "$system_prompt_fix
+
+The user's last command failed.
+Explain why it failed and suggest a fix.
+Do not execute commands."
+    return
+  fi
+
+  # ---- Interactive prompt fallback (e.g. if quotes broke argument parsing) ----
+  if [[ -z "$prompt" ]]; then
+    echo -n -e "${COLOR_CYAN}Ask: ${COLOR_RESET}"
+    read -r prompt
+    [[ -z "$prompt" ]] && return 0
+  fi
 
   # Force deep persona for explanation queries
   if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
@@ -157,31 +182,17 @@ Prefer correctness over speed."
 Be concise, practical, and production-safe."
   fi
 
-  # ---- Auto-fix failed command ----
-  if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
-    llm -m "$AI_MODEL_THINKING" \
-      -f "$ctxdir/history.txt" \
-      -f "$ctxdir/pwd.txt" \
-      -f "$ctxdir/git.txt" \
-      -f "$ctxdir/exit.txt" \
-      "$system_prompt
-
-The user's last command failed.
-Explain why it failed and suggest a fix.
-Do not execute commands."
-    return
-  fi
-
   # ---- Explanation mode ----
   if [[ "$prompt" =~ ^(how|why|what|explain|help)(\s|$) ]]; then
     llm -m "$model" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
+      -f "$tmpdir/last_prompt.txt" \
       "$system_prompt
 
 Explain and suggest, but do NOT give commands to execute.
-User question: $prompt"
+The user's question is in the attached last_prompt.txt."
     return
   fi
 
@@ -191,9 +202,10 @@ User question: $prompt"
     -f "$ctxdir/history.txt" \
     -f "$ctxdir/pwd.txt" \
     -f "$ctxdir/git.txt" \
+    -f "$tmpdir/last_prompt.txt" \
     "$system_prompt
 
-User request: '$prompt'
+The user's request is in the attached last_prompt.txt.
 
 Rules:
 - If the request is a shell/system task, output ONLY the command (no explanation)
@@ -201,8 +213,8 @@ Rules:
 - Never use rm -rf
 - Avoid destructive commands")
 
-  # ---- Strip markdown code blocks and trim whitespace ----
-  response=$(echo "$response" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
+  # ---- Strip thinking blocks and markdown code fences, trim whitespace ----
+  response=$(echo "$response" | sed '/<think>/,/<\/think>/d' | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
   response="${response#"${response%%[![:space:]]*}"}"  # trim leading whitespace
   response="${response%"${response##*[![:space:]]}"}"  # trim trailing whitespace
 
@@ -224,7 +236,6 @@ Rules:
 
   # ---- Persist memory ----
   echo "$response" > "$tmpdir/last_command.txt"
-  echo "$prompt" > "$tmpdir/last_prompt.txt"
   echo "$persona" > "$tmpdir/last_persona.txt"
 
   echo
@@ -374,6 +385,7 @@ _ai_agent_load_checkpoint() {
 
 _ai_agent_get_history() {
   local agentdir="$1"
+  local max_history="${2:-5}"  # Only send last N steps to keep prompt small
   local cpdir="$agentdir/checkpoints"
   local step_log=""
 
@@ -382,20 +394,30 @@ _ai_agent_get_history() {
     return
   fi
 
+  # Get step files, take only the last N
+  local all_files
+  all_files=$(ls "$cpdir"/step_*.json 2>/dev/null | sort -V)
+  local total
+  total=$(echo "$all_files" | grep -c .)
+
+  if [[ $total -gt $max_history ]]; then
+    local skipped=$((total - max_history))
+    step_log="(Steps 1-$skipped omitted for brevity)"$'\n'
+  fi
+
   local _f _sn _act _ss _out
-  for _f in $(ls "$cpdir"/step_*.json 2>/dev/null | sort -V); do
+  echo "$all_files" | tail -n "$max_history" | while IFS= read -r _f; do
+    [[ -z "$_f" ]] && continue
     _sn=$(basename "$_f" | sed 's/step_//;s/\.json//')
     _act=$(grep '"action"' "$_f" | sed 's/.*"action": *"//;s/",*//')
     _ss=$(grep '"status"' "$_f" | sed 's/.*"status": *"//;s/".*//')
     _out=""
-    [[ -f "$cpdir/step_${_sn}_output.txt" ]] && _out=$(head -20 "$cpdir/step_${_sn}_output.txt")
+    [[ -f "$cpdir/step_${_sn}_output.txt" ]] && _out=$(head -5 "$cpdir/step_${_sn}_output.txt")
 
-    step_log+="
---- Step $_sn ($_ss) ---
-Action: $_act
-Output (first 20 lines):
-$_out
-"
+    echo "--- Step $_sn ($_ss) ---"
+    echo "Action: $_act"
+    echo "Output: $_out"
+    echo
   done
   echo "$step_log"
 }
@@ -548,14 +570,14 @@ _ai_agent() {
 
   local iteration=$start_step
   local total_steps=0
-  local _hist="" _resp="" tool_output="" tool_exit=0 step_status="" cmd="" exec_result=0 summary="" reason="" confirm=""
+  local _resp="" tool_output="" tool_exit=0 step_status="" cmd="" exec_result=0 summary="" reason="" confirm=""
   while true; do
   while [[ $iteration -lt $max_steps ]]; do
     ((iteration++))
     ((total_steps++))
 
-    # Build agent history from checkpoints
-    _hist=$(_ai_agent_get_history "$agentdir")
+    # Build agent history from checkpoints (last 5 steps to keep prompt small)
+    _ai_agent_get_history "$agentdir" 5 > "$agentdir/history_context.txt"
 
     # Thinking indicator
     echo -ne "${COLOR_DIM}  ⏳ Thinking...${COLOR_RESET}\r"
@@ -564,15 +586,16 @@ _ai_agent() {
     _resp=$(llm -m "$AI_MODEL_TASK" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
+      -f "$agentdir/goal.txt" \
+      -f "$agentdir/history_context.txt" \
       "You are an autonomous shell agent working toward a goal.
 The user's OS is: $AI_OS
 
-GOAL: $goal
+The goal is in the attached goal.txt.
 
-STEP: $iteration of $max_steps
+STEP: $iteration of $max_steps (total: $total_steps)
 
-PREVIOUS STEPS:
-$_hist
+The attached history_context.txt contains your previous steps.
 
 AVAILABLE TOOLS:
 - COMMAND: <shell command>         — Execute a shell command
@@ -597,8 +620,8 @@ Rules:
     # Clear thinking indicator
     echo -ne "\033[2K\r"
 
-    # Trim response
-    _resp=$(echo "$_resp" | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
+    # Trim response (strip <think> blocks from reasoning models, then code fences)
+    _resp=$(echo "$_resp" | sed '/<think>/,/<\/think>/d' | sed 's/^```[a-z]*//g' | sed 's/```$//g' | sed '/^$/d' | head -1)
     _resp="${_resp#"${_resp%%[![:space:]]*}"}"
     _resp="${_resp%"${_resp##*[![:space:]]}"}"
 
@@ -765,7 +788,19 @@ _ai_confirm_and_run() {
 # Re-export the function as 'ai' for convenience  
 ai() { _ai "$@"; }
 
-# Enable nonomatch in zsh so unmatched globs (like ?) are passed literally
+# ---- Zsh integration ----
 if [[ -n "$ZSH_VERSION" ]]; then
+  # Enable nonomatch so unmatched globs (like ?) are passed literally
   setopt nonomatch
+
+  # ZLE widget: replace apostrophes in ai commands with Unicode equivalent (ʼ U+02BC)
+  # Visually identical, but doesn't break shell parsing. History stays clean.
+  _ai_accept_line() {
+    if [[ "$BUFFER" =~ ^ai[[:space:]] && "$BUFFER" == *"'"* ]]; then
+      BUFFER="${BUFFER//\'/ʼ}"
+      CURSOR=${#BUFFER}
+    fi
+    zle .accept-line
+  }
+  zle -N accept-line _ai_accept_line
 fi
