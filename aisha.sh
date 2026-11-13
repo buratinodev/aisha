@@ -18,48 +18,35 @@
 # the core) or AISHA_* environment variables. See `ai /help`.
 
 # ============================================================================
-# Installer  (run as: ./aisha.sh --install)
+# Installer bootstrap  (run as: ./aisha.sh --install | --uninstall)
 # ============================================================================
+# The real installer lives in the Python core (dependency checks, upgrades,
+# rc-file management). The shim only bootstraps it — and only when this file
+# is executed, never when sourced.
 
-if [[ "$1" == "--install" ]]; then
-  user_shell=$(basename "$SHELL")
-
-  if [[ "$user_shell" == "bash" ]]; then
-    rc_file="$HOME/.bashrc"
-  elif [[ "$user_shell" == "zsh" ]]; then
-    rc_file="$HOME/.zshrc"
-  else
-    echo "Error: Unsupported shell '$user_shell'. Only bash and zsh are supported."
-    exit 1
-  fi
-
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
-  if [[ ! -f "$script_dir/aisha_core.py" ]]; then
-    echo "Error: aisha_core.py not found next to aisha.sh"
-    exit 1
-  fi
-  cp "$script_dir/$(basename "$0")" "$HOME/.aisha"
-  cp "$script_dir/aisha_core.py" "$HOME/.aisha-core.py"
-  echo "✓ Copied aisha.sh to ~/.aisha and aisha_core.py to ~/.aisha-core.py"
-
-  if grep -q "Load AI shell helpers" "$rc_file" 2>/dev/null; then
-    echo "⚠ aisha is already configured in $rc_file"
-  else
-    {
-      echo ""
-      echo "# Load AI shell helpers"
-      echo 'if [[ -f "$HOME/.aisha" ]]; then'
-      echo '  source "$HOME/.aisha"'
-      echo 'fi'
-    } >> "$rc_file"
-    echo "✓ Added aisha loader to $rc_file"
-  fi
-
-  echo ""
-  echo "Installation complete!"
-  echo "Run: source $rc_file (or open a new terminal window)"
-  exit 0
+_aisha_executed=0
+if [[ -n "$BASH_VERSION" && "${BASH_SOURCE[0]}" == "$0" ]]; then
+  _aisha_executed=1
+elif [[ -n "$ZSH_VERSION" ]]; then
+  case "$ZSH_EVAL_CONTEXT" in *:file*) ;; *) _aisha_executed=1 ;; esac
 fi
+
+if [[ "$_aisha_executed" == 1 && ( "$1" == "--install" || "$1" == "--uninstall" ) ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Error: python3 is required to install aisha." >&2
+    exit 1
+  fi
+  _aisha_dir="$(cd "$(dirname "$0")" && pwd)"
+  _aisha_core="$_aisha_dir/aisha_core.py"
+  [[ -f "$_aisha_core" ]] || _aisha_core="$HOME/.aisha-core.py"
+  if [[ ! -f "$_aisha_core" ]]; then
+    echo "Error: aisha_core.py not found next to aisha.sh" >&2
+    exit 1
+  fi
+  python3 "$_aisha_core" "$1" --shim "$_aisha_dir/$(basename "$0")"
+  exit $?
+fi
+unset _aisha_executed
 
 # ============================================================================
 # Locate the Python core
@@ -162,7 +149,7 @@ ai() {
 # Shell integration  (zsh ZLE + completion, bash completion)
 # ============================================================================
 
-_AISHA_COMPLETIONS="redo rerun explain /help /tips --deep --agent --agent-safe -n --no-exec -c --refine --help --version"
+_AISHA_COMPLETIONS="redo rerun explain /help /tips --deep --agent --agent-safe -n --no-exec -c --refine --help --version --install --uninstall"
 
 if [[ -n "$ZSH_VERSION" ]]; then
   # Pass unmatched globs (?, *) literally instead of erroring

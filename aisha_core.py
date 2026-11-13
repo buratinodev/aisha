@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -670,6 +670,7 @@ def cmd_help():
 - `--agent <goal>` — autonomous multi-step mode (`--agent --resume` to continue)
 - `--agent-safe <goal>` — agent mode, confirm every step
 - `--version` — print version
+- `--install` / `--uninstall` — install, upgrade, or remove aisha
 
 ### Piping
 - `docker logs app 2>&1 | ai why is this crashing` — piped input becomes context
@@ -1095,6 +1096,248 @@ def cmd_agent(mode, args):
 
 
 # ============================================================================
+# Installer / uninstaller
+# ============================================================================
+
+RC_MARKER = "# Load AI shell helpers"
+RC_BLOCK = f"""
+{RC_MARKER}
+if [[ -f "$HOME/.aisha" ]]; then
+  source "$HOME/.aisha"
+fi
+"""
+
+OLLAMA_RELEASES = "https://github.com/ollama/ollama/releases"
+
+
+def _ask(question, default_yes=True):
+    """Interactive yes/no; never answers yes without a human on a tty."""
+    if not sys.stdin.isatty():
+        return False
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    sys.stdout.write(f"{GREEN}{question} {suffix}:{RESET} ")
+    sys.stdout.flush()
+    try:
+        reply = input().strip().lower()
+    except EOFError:
+        return False
+    if not reply:
+        return default_yes
+    return reply in ("y", "yes")
+
+
+def _run_visible(args, shell=False):
+    out(f"{DIM}  $ {args if shell else ' '.join(args)}{RESET}")
+    try:
+        return subprocess.run(args, shell=shell).returncode == 0
+    except OSError as e:
+        err(f"  failed: {e}")
+        return False
+
+
+def _which(name):
+    import shutil
+    return shutil.which(name)
+
+
+def _installed_version(path):
+    m = re.search(r'^VERSION = "([^"]+)"', read_file(path), flags=re.M)
+    return m.group(1) if m else None
+
+
+def _rc_file():
+    shell = os.path.basename(os.environ.get("SHELL", ""))
+    if shell == "bash":
+        return os.path.expanduser("~/.bashrc")
+    if shell == "zsh":
+        return os.path.expanduser("~/.zshrc")
+    return None
+
+
+def _install_ollama_darwin():
+    """Download the latest release tarball and install to ~/.local/bin."""
+    import tarfile
+    import tempfile
+    import urllib.request
+    url = f"{OLLAMA_RELEASES}/latest/download/ollama-darwin.tgz"
+    out(f"  Downloading {url} ...")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tgz = os.path.join(tmp, "ollama.tgz")
+            urllib.request.urlretrieve(url, tgz)
+            with tarfile.open(tgz) as tar:
+                tar.extract("ollama", path=tmp)
+            dest_dir = os.path.expanduser("~/.local/bin")
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = os.path.join(dest_dir, "ollama")
+            os.replace(os.path.join(tmp, "ollama"), dest)
+            os.chmod(dest, 0o755)
+    except (OSError, KeyError, tarfile.TarError) as e:
+        err(f"  Download failed: {e}")
+        out(f"  Install manually from {OLLAMA_RELEASES} or https://ollama.com/download")
+        return False
+    out(f"{GREEN}✓ Installed ollama to {dest}{RESET}")
+    if dest_dir not in os.environ.get("PATH", "").split(":"):
+        print(f"{YELLOW}⚠ {dest_dir} is not in your PATH — add it to your shell rc file.{RESET}")
+    out(f"  {DIM}Note: run 'ollama serve' to start the server (the Mac app does this automatically).{RESET}")
+    return True
+
+
+def check_dependencies():
+    """Check for llm and ollama; offer to install what's missing."""
+    out("")
+    out(f"{CYAN}Checking dependencies...{RESET}")
+
+    # ---- llm CLI ----
+    if _which("llm"):
+        out(f"{GREEN}✓ llm found{RESET} {DIM}({_which('llm')}){RESET}")
+    else:
+        print(f"{YELLOW}⚠ llm CLI not found{RESET}")
+        if _ask("Install llm now?"):
+            if _which("brew"):
+                ok = _run_visible(["brew", "install", "llm"])
+            else:
+                ok = _run_visible([sys.executable, "-m", "pip", "install", "--user", "llm"])
+            if not ok:
+                err("  llm installation failed — install manually: pip install llm")
+        else:
+            out(f"  {DIM}Install later with: pip install llm  (or: brew install llm){RESET}")
+
+    # ---- llm-ollama plugin ----
+    if _which("llm"):
+        try:
+            plugins = subprocess.run(["llm", "plugins"], capture_output=True,
+                                     text=True, timeout=30).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            plugins = ""
+        if "llm-ollama" in plugins:
+            out(f"{GREEN}✓ llm-ollama plugin found{RESET}")
+        else:
+            print(f"{YELLOW}⚠ llm-ollama plugin not found{RESET}")
+            if _ask("Install the llm-ollama plugin now?"):
+                _run_visible(["llm", "install", "llm-ollama"])
+            else:
+                out(f"  {DIM}Install later with: llm install llm-ollama{RESET}")
+
+    # ---- ollama ----
+    if _which("ollama"):
+        out(f"{GREEN}✓ ollama found{RESET} {DIM}({_which('ollama')}){RESET}")
+    else:
+        print(f"{YELLOW}⚠ ollama not found{RESET}")
+        if sys.platform == "darwin":
+            if _which("brew"):
+                if _ask("Install ollama now (brew install ollama)?"):
+                    _run_visible(["brew", "install", "ollama"])
+                else:
+                    out(f"  {DIM}Install later with: brew install ollama "
+                        f"(or from {OLLAMA_RELEASES}){RESET}")
+            elif _ask(f"Download ollama from {OLLAMA_RELEASES} to ~/.local/bin?"):
+                _install_ollama_darwin()
+            else:
+                out(f"  {DIM}Install from {OLLAMA_RELEASES} or https://ollama.com/download{RESET}")
+        else:
+            if _ask("Install ollama now (official install script, needs curl)?"):
+                _run_visible("curl -fsSL https://ollama.com/install.sh | sh", shell=True)
+            else:
+                out(f"  {DIM}Install later: curl -fsSL https://ollama.com/install.sh | sh "
+                    f"(or from {OLLAMA_RELEASES}){RESET}")
+
+    if _which("ollama"):
+        out("")
+        out(f"{DIM}Pull models for your hardware (see README for the full guide):{RESET}")
+        out(f"{DIM}  48 GB Mac:  ollama pull qwen3.6:35b-mlx && ollama pull gemma4:31b-mlx{RESET}")
+        out(f"{DIM}  16 GB Mac:  ollama pull gemma4:e4b-mlx && ollama pull qwen3.5:9b-mlx{RESET}")
+
+
+def cmd_install(shim_path):
+    rc_file = _rc_file()
+    if rc_file is None:
+        err(f"Error: Unsupported shell '{os.path.basename(os.environ.get('SHELL', ''))}'. "
+            "Only bash and zsh are supported.")
+        return 1
+    if not shim_path or not os.path.isfile(shim_path):
+        err("Error: cannot locate aisha.sh to install.")
+        return 1
+    core_src = os.path.abspath(__file__)
+
+    dest_shim = os.path.expanduser("~/.aisha")
+    dest_core = os.path.expanduser("~/.aisha-core.py")
+    old = _installed_version(dest_core)
+
+    import shutil
+    shutil.copyfile(shim_path, dest_shim)
+    shutil.copyfile(core_src, dest_core)
+    if old is None:
+        out(f"{GREEN}✓ Installed aisha {VERSION} (~/.aisha, ~/.aisha-core.py){RESET}")
+    elif old == VERSION:
+        out(f"{GREEN}✓ aisha {VERSION} already installed — files refreshed{RESET}")
+    else:
+        out(f"{GREEN}✓ Upgraded aisha {old} → {VERSION}{RESET}")
+
+    rc_text = read_file(rc_file)
+    if RC_MARKER in rc_text:
+        print(f"{YELLOW}⚠ aisha is already configured in {rc_file}{RESET}")
+    else:
+        with open(rc_file, "a", encoding="utf-8") as f:
+            f.write(RC_BLOCK)
+        out(f"{GREEN}✓ Added aisha loader to {rc_file}{RESET}")
+
+    check_dependencies()
+
+    out("")
+    out(f"{CYAN}Installation complete!{RESET}")
+    out(f"Run: {YELLOW}source {rc_file}{RESET} (or open a new terminal window)")
+    return 0
+
+
+def _remove_rc_block(rc_file):
+    lines = read_file(rc_file).splitlines()
+    if not lines:
+        return False
+    try:
+        i = lines.index(RC_MARKER)
+    except ValueError:
+        return False
+    end = i + 1
+    while end < len(lines) and lines[end].strip() != "fi":
+        end += 1
+    if end < len(lines):
+        end += 1  # include the fi
+    if i > 0 and not lines[i - 1].strip():
+        i -= 1  # drop the blank line the installer added
+    import shutil
+    shutil.copyfile(rc_file, rc_file + ".aisha-bak")
+    write_text(rc_file, "\n".join(lines[:i] + lines[end:]) + "\n")
+    return True
+
+
+def cmd_uninstall():
+    removed = False
+    for path in ("~/.aisha", "~/.aisha-core.py"):
+        full = os.path.expanduser(path)
+        if os.path.isfile(full):
+            os.remove(full)
+            out(f"{GREEN}✓ Removed {path}{RESET}")
+            removed = True
+    for rc in ("~/.bashrc", "~/.zshrc"):
+        full = os.path.expanduser(rc)
+        if os.path.isfile(full) and _remove_rc_block(full):
+            out(f"{GREEN}✓ Removed aisha loader from {rc} (backup: {rc}.aisha-bak){RESET}")
+            removed = True
+    if os.path.isdir(STATE_ROOT) and _ask(f"Remove state directory {STATE_ROOT}?",
+                                          default_yes=False):
+        import shutil
+        shutil.rmtree(STATE_ROOT, ignore_errors=True)
+        out(f"{GREEN}✓ Removed {STATE_ROOT}{RESET}")
+    if not removed:
+        print(f"{YELLOW}Nothing to uninstall.{RESET}")
+    else:
+        out(f"{DIM}Config file left in place: {cfg('AISHA_CONFIG_FILE')}{RESET}")
+        out(f"{DIM}Open a new terminal for the change to take effect.{RESET}")
+    return 0
+
+
+# ============================================================================
 # Main dispatch
 # ============================================================================
 
@@ -1115,6 +1358,21 @@ def main(argv):
         for line in sys.stdin.read().splitlines():
             r.feed(line)
         return 0
+
+    # ---- installer / uninstaller ----
+    if argv[:1] == ["--install"]:
+        if "--shim" in argv:
+            shim = argv[argv.index("--shim") + 1]
+        else:
+            here = os.path.dirname(os.path.abspath(__file__))
+            shim = None
+            for cand in (os.path.join(here, "aisha.sh"), os.path.expanduser("~/.aisha")):
+                if os.path.isfile(cand):
+                    shim = cand
+                    break
+        return cmd_install(shim)
+    if argv[:1] == ["--uninstall"]:
+        return cmd_uninstall()
 
     ensure_dirs()
 

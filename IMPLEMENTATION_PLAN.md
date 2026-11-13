@@ -298,14 +298,22 @@ the repo — adds a network dependency. Decide once the core stabilizes;
    `accept-line` widget, or retire it in favor of the Ask fallback
    (finding #10).
 4. ~~`ai rerun`~~ → shipped early with the Phase 2 follow-ups (finding #12).
-5. Installer: version stamp in the installed file, `--install` upgrades in
-   place, `--uninstall` removes the rc-file block.
+5. ~~Installer~~ → shipped (2026-11-13): installer moved into the Python core
+   (shim only bootstraps it when executed); `--install` is version-aware and
+   upgrades in place; `--uninstall` removes both files and the rc-file block
+   (with backup) and offers to delete state; dependency checks offer to
+   install `llm` (brew/pip), the `llm-ollama` plugin, and `ollama` (brew,
+   GitHub-release download to `~/.local/bin` on macOS, official script on
+   Linux) — each behind a Y/n prompt, instructions-only when non-interactive.
+   **Single-file install decided:** option (c) — a curl-able `install.sh`
+   that downloads both files and runs the installer. Option (b) (heredoc
+   embedding) rejected: escaping maintenance outweighs the benefit now that
+   `install.sh` gives the same one-command experience.
 
 ---
 
 ## Next up
 
-Phase 5 remnants: installer upgrades/--uninstall, ZLE widget wrapping, and a
-decision on the single-file install options above. Candidate new items: agent
-test coverage in bats (the port made the agent testable via the llm stub),
-and a `--json` output mode for scripting.
+Phase 5 remnants: ZLE widget wrapping (finding #10). Candidate new items:
+agent test coverage in bats (the port made the agent testable via the llm
+stub), and a `--json` output mode for scripting.

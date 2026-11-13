@@ -50,31 +50,59 @@ Perfect for:
 
 ## Installation
 
-### Automatic Installation
+### One-Command Install
 
-1. Clone or download this repository:
-   ```bash
-   git clone https://github.com/buratinodev/aisha.git
-   cd aisha
-   ```
+```bash
+curl -fsSL https://raw.githubusercontent.com/buratinodev/aisha/main/install.sh | bash
+```
 
-2. Run the installer:
-   ```bash
-   ./aisha.sh --install
-   ```
+### From a Clone
 
-   This will:
-   - Copy `aisha.sh` to `~/.aisha`
-   - Detect your shell (bash or zsh)
-   - Add the loader to your `~/.bashrc` or `~/.zshrc`
-   - Display instructions for activating
+```bash
+git clone https://github.com/buratinodev/aisha.git
+cd aisha
+./aisha.sh --install
+```
 
-3. Load aisha in your current shell:
-   ```bash
-   source ~/.zshrc  # or source ~/.bashrc for bash users
-   ```
+Either way, the installer:
+- Copies `aisha.sh` to `~/.aisha` and `aisha_core.py` to `~/.aisha-core.py`
+- Detects your shell (bash or zsh) and adds the loader to your
+  `~/.bashrc` or `~/.zshrc`
+- **Checks dependencies and offers to install what's missing:**
+  - `llm` CLI — via Homebrew if available, otherwise `pip install --user llm`
+  - `llm-ollama` plugin — via `llm install llm-ollama`
+  - `ollama` — via Homebrew on macOS (or a direct download of the latest
+    [GitHub release](https://github.com/ollama/ollama/releases) to
+    `~/.local/bin`), or the official install script on Linux
+- Prints the model-pull commands for your hardware tier
 
-   Or simply open a new terminal window.
+Nothing is installed without asking — each missing dependency gets a Y/n
+prompt, and in non-interactive runs the installer only prints instructions.
+
+Then load aisha in your current shell:
+```bash
+source ~/.zshrc  # or source ~/.bashrc for bash users
+```
+
+### Upgrading
+
+Re-run the installer from an updated clone — it detects the installed
+version and upgrades in place:
+
+```bash
+git pull && ./aisha.sh --install
+# ✓ Upgraded aisha 0.3.0 → 0.4.0
+```
+
+### Uninstall
+
+```bash
+ai --uninstall        # or: ./aisha.sh --uninstall
+```
+
+Removes `~/.aisha` and `~/.aisha-core.py`, removes the loader block from your
+shell rc file (a `.aisha-bak` backup is written first), and offers to delete
+the state directory. Your config file is left in place.
 
 ### Manual Installation
 

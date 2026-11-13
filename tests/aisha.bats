@@ -313,6 +313,42 @@ teardown() {
   [[ "$output" != *"Execute this command"* ]]
 }
 
+# ---- installer ----------------------------------------------------------------
+
+@test "--install copies files and adds the loader; re-run is idempotent; --uninstall reverses" {
+  export SHELL=/bin/bash
+  touch "$HOME/.bashrc"
+
+  run bash "$AISHA_SH" --install < /dev/null
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.aisha" ]
+  [ -f "$HOME/.aisha-core.py" ]
+  grep -q "Load AI shell helpers" "$HOME/.bashrc"
+  [[ "$output" == *"Installed aisha"* ]]
+
+  run bash "$AISHA_SH" --install < /dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already installed"* ]]
+  [[ "$output" == *"already configured"* ]]
+  [ "$(grep -c "Load AI shell helpers" "$HOME/.bashrc")" -eq 1 ]
+
+  run bash "$AISHA_SH" --uninstall < /dev/null
+  [ "$status" -eq 0 ]
+  [ ! -f "$HOME/.aisha" ]
+  [ ! -f "$HOME/.aisha-core.py" ]
+  ! grep -q "Load AI shell helpers" "$HOME/.bashrc"
+}
+
+@test "installed copy works standalone (core found at ~/.aisha-core.py)" {
+  export SHELL=/bin/bash
+  touch "$HOME/.bashrc"
+  bash "$AISHA_SH" --install < /dev/null > /dev/null
+  export AISHA_TEST_LLM_RESPONSE="uptime"
+  run bash -c 'source "$HOME/.aisha"; cd "$HOME"; ai -n show system uptime < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$output" = "uptime" ]
+}
+
 # ---- markdown renderer -------------------------------------------------------
 
 @test "render_markdown renders headings, bullets and strips think blocks" {
