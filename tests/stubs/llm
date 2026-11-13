@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Test stub for the `llm` CLI.
+# Records its argv to $AISHA_TEST_LLM_LOG (if set) and prints the canned
+# response from $AISHA_TEST_LLM_RESPONSE.
+if [[ -n "$AISHA_TEST_LLM_LOG" ]]; then
+  printf 'ARGS: %s\n' "$*" >> "$AISHA_TEST_LLM_LOG"
+fi
+printf '%s\n' "${AISHA_TEST_LLM_RESPONSE:-echo stub-response}"

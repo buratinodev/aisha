@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 
 # ╔════════════════════════════════════════════════════════════════════════════╗
 # ║  aisha — AI-Powered Shell Assistant                                       ║
@@ -21,29 +22,39 @@
 # ============================================================================
 # 1. CONFIGURATION
 # ============================================================================
+# All knobs can be overridden from the environment before sourcing, e.g.
+#   export AISHA_MODEL_TASK="llama3.3:70b"
 
 # ---- Colors ----
-COLOR_RED="\033[1;31m"
-COLOR_GREEN="\033[1;32m"
-COLOR_YELLOW="\033[1;33m"
-COLOR_CYAN="\033[1;36m"
-COLOR_DIM="\033[2m"
-COLOR_BOLD="\033[1m"
-COLOR_WHITE="\033[1;37m"
-COLOR_RESET="\033[0m"
+AISHA_COLOR_RED="\033[1;31m"
+AISHA_COLOR_GREEN="\033[1;32m"
+AISHA_COLOR_YELLOW="\033[1;33m"
+AISHA_COLOR_CYAN="\033[1;36m"
+AISHA_COLOR_DIM="\033[2m"
+AISHA_COLOR_BOLD="\033[1m"
+AISHA_COLOR_WHITE="\033[1;37m"
+AISHA_COLOR_RESET="\033[0m"
 
 # ---- Models ----
-AI_MODEL_TASK="qwen3-coder:30b"       # Fast model for command suggestions & agent steps
-AI_MODEL_THINKING="qwen3:32b"         # Reasoning model for deep analysis & explanations
+AISHA_MODEL_TASK="${AISHA_MODEL_TASK:-qwen3-coder:30b}"   # Fast model for command suggestions & agent steps
+AISHA_MODEL_THINKING="${AISHA_MODEL_THINKING:-qwen3:32b}" # Reasoning model for deep analysis & explanations
 
 # ---- Agent ----
-AI_AGENT_MAX_STEPS=15
-AI_AGENT_TOOLS="command,read_file,write_file,search,web_fetch"
+AISHA_AGENT_MAX_STEPS="${AISHA_AGENT_MAX_STEPS:-15}"
+# shellcheck disable=SC2034  # reserved: tool gating is enforced in a later phase
+AISHA_AGENT_TOOLS="${AISHA_AGENT_TOOLS:-command,read_file,write_file,search,web_fetch}"
+
+# ---- State directories (XDG, per shell session) ----
+# Each interactive shell gets its own state dir so concurrent terminals don't
+# clobber each other's context, suggestions, or agent checkpoints.
+AISHA_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/aisha"
+AISHA_SESSION_DIR="$AISHA_STATE_ROOT/session-$$"
 
 # ---- OS detection (e.g. "Darwin/arm64 macOS 15.3") ----
-AI_OS="$(uname -s)/$(uname -m)"
-[[ -f /etc/os-release ]] && AI_OS="$AI_OS $(. /etc/os-release && echo "$NAME $VERSION_ID")"
-[[ "$(uname -s)" == "Darwin" ]] && AI_OS="$AI_OS macOS $(sw_vers -productVersion 2>/dev/null)"
+AISHA_OS="$(uname -s)/$(uname -m)"
+# shellcheck disable=SC1091
+[[ -f /etc/os-release ]] && AISHA_OS="$AISHA_OS $(. /etc/os-release && echo "$NAME $VERSION_ID")"
+[[ "$(uname -s)" == "Darwin" ]] && AISHA_OS="$AISHA_OS macOS $(sw_vers -productVersion 2>/dev/null)"
 
 
 # ============================================================================
@@ -58,28 +69,28 @@ if [[ "$1" == "--install" ]]; then
   elif [[ "$user_shell" == "zsh" ]]; then
     rc_file="$HOME/.zshrc"
   else
-    echo -e "${COLOR_RED}Error: Unsupported shell '$user_shell'. Only bash and zsh are supported.${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_RED}Error: Unsupported shell '$user_shell'. Only bash and zsh are supported.${AISHA_COLOR_RESET}"
     exit 1
   fi
 
   script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   cp "$script_path" "$HOME/.aisha"
-  echo -e "${COLOR_GREEN}✓ Copied aisha.sh to ~/.aisha${COLOR_RESET}"
+  echo -e "${AISHA_COLOR_GREEN}✓ Copied aisha.sh to ~/.aisha${AISHA_COLOR_RESET}"
 
   if grep -q "Load AI shell helpers" "$rc_file" 2>/dev/null; then
-    echo -e "${COLOR_YELLOW}⚠ aisha is already configured in $rc_file${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_YELLOW}⚠ aisha is already configured in $rc_file${AISHA_COLOR_RESET}"
   else
     echo "" >> "$rc_file"
     echo "# Load AI shell helpers" >> "$rc_file"
     echo 'if [[ -f "$HOME/.aisha" ]]; then' >> "$rc_file"
     echo '  source "$HOME/.aisha"' >> "$rc_file"
     echo 'fi' >> "$rc_file"
-    echo -e "${COLOR_GREEN}✓ Added aisha loader to $rc_file${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_GREEN}✓ Added aisha loader to $rc_file${AISHA_COLOR_RESET}"
   fi
 
   echo ""
-  echo -e "${COLOR_CYAN}Installation complete!${COLOR_RESET}"
-  echo -e "Run: ${COLOR_YELLOW}source $rc_file${COLOR_RESET} to load aisha in your current shell"
+  echo -e "${AISHA_COLOR_CYAN}Installation complete!${AISHA_COLOR_RESET}"
+  echo -e "Run: ${AISHA_COLOR_YELLOW}source $rc_file${AISHA_COLOR_RESET} to load aisha in your current shell"
   echo -e "Or open a new terminal window."
   exit 0
 fi
@@ -90,37 +101,54 @@ fi
 # ============================================================================
 
 # Regex used to detect risky commands (shared by _ai_confirm_and_run and agent)
-_AI_RISKY_RE='(^|\s)(sudo|rm|dd|mkfs|shred|find.*(rm|shred)|mv.*deleted|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'
+_AISHA_RISKY_RE='(^|\s)(sudo|rm|dd|mkfs|shred|find.*(rm|shred)|mv.*deleted|kubectl delete|terraform (apply|destroy)|gcloud delete)(\s|$)'
 
 # Regex for interactive/curses programs that break when piped through tee/subshell
-_AI_INTERACTIVE_RE='^(top|htop|btop|nmon|vim|vi|nvim|nano|less|more|man|watch|tmux|screen)( |$)'
+_AISHA_INTERACTIVE_RE='^(top|htop|btop|nmon|vim|vi|nvim|nano|less|more|man|watch|tmux|screen)( |$)'
 
 # Build a system prompt for the given persona.
 _ai_system_prompt() {
   local persona="$1"
   if [[ "$persona" == "deep" ]]; then
-    echo "You are a senior systems engineer. The user's OS is: $AI_OS
+    echo "You are a senior systems engineer. The user's OS is: $AISHA_OS
 Think step-by-step, consider edge cases, tradeoffs, and failure modes.
 Prefer correctness over speed."
   else
-    echo "You are an expert Unix/Linux sysadmin. The user's OS is: $AI_OS
+    echo "You are an expert Unix/Linux sysadmin. The user's OS is: $AISHA_OS
 Be concise, practical, and production-safe."
   fi
 }
 
 # Select the LLM model for a persona.
 _ai_model_for() {
-  [[ "$1" == "deep" ]] && echo "$AI_MODEL_THINKING" || echo "$AI_MODEL_TASK"
+  [[ "$1" == "deep" ]] && echo "$AISHA_MODEL_THINKING" || echo "$AISHA_MODEL_TASK"
+}
+
+# Create this session's state dir, point the "latest" symlink at it, and
+# prune state dirs left behind by shells that are no longer running.
+_ai_state_init() {
+  mkdir -p "$AISHA_SESSION_DIR/last_context"
+  ln -sfn "$AISHA_SESSION_DIR" "$AISHA_STATE_ROOT/latest" 2>/dev/null
+
+  [[ -n "$_AISHA_STATE_PRUNED" ]] && return 0
+  _AISHA_STATE_PRUNED=1
+  local d pid
+  for d in "$AISHA_STATE_ROOT"/session-*; do
+    [[ -d "$d" ]] || continue
+    pid="${d##*session-}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" == "$$" ]] && continue
+    kill -0 "$pid" 2>/dev/null || rm -rf "$d"
+  done
 }
 
 # Capture shell context (history, pwd, git status, exit code) into $ctxdir.
-# Sets $last_exit as a side effect.
+# $2 is the exit code of the user's last command, captured at ai() entry.
 _ai_capture_context() {
-  local ctxdir="$1"
+  local ctxdir="$1" last_exit="${2:-0}"
   fc -l -15 > "$ctxdir/history.txt" 2>/dev/null
   pwd > "$ctxdir/pwd.txt"
   git status --short 2>/dev/null > "$ctxdir/git.txt"
-  last_exit=$?
   echo "Last exit code: $last_exit" > "$ctxdir/exit.txt"
 }
 
@@ -169,27 +197,27 @@ _ai_render_markdown() {
         in_code=true
         # Print language label if present
         lang="${line#\`\`\`}"
-        [[ -n "$lang" ]] && printf "${COLOR_DIM}  ── %s ──${COLOR_RESET}\n" "$lang"
+        [[ -n "$lang" ]] && printf "${AISHA_COLOR_DIM}  ── %s ──${AISHA_COLOR_RESET}\n" "$lang"
       fi
       continue
     fi
 
     # Inside code block → yellow
     if $in_code; then
-      printf "${COLOR_YELLOW}  %s${COLOR_RESET}\n" "$line"
+      printf "${AISHA_COLOR_YELLOW}  %s${AISHA_COLOR_RESET}\n" "$line"
       continue
     fi
 
     # Heading → bold cyan (strip leading #'s and whitespace)
     if [[ "$line" =~ ^#{1,4}[[:space:]] ]]; then
       heading=$(echo "$line" | sed 's/^#* *//')
-      printf "\n${COLOR_CYAN}${COLOR_BOLD}  %s${COLOR_RESET}\n" "$heading"
+      printf "\n${AISHA_COLOR_CYAN}${AISHA_COLOR_BOLD}  %s${AISHA_COLOR_RESET}\n" "$heading"
       continue
     fi
 
     # Horizontal rule
     if [[ "$line" =~ ^-{3,}$ ]]; then
-      printf "${COLOR_DIM}  ──────────────────────────────────────${COLOR_RESET}\n"
+      printf "${AISHA_COLOR_DIM}  ──────────────────────────────────────${AISHA_COLOR_RESET}\n"
       continue
     fi
 
@@ -197,8 +225,8 @@ _ai_render_markdown() {
     if [[ "$line" =~ ^[[:space:]]*[-*][[:space:]] ]]; then
       bullet_text="${line#*[-\*] }"
       # Colorize inline `code` within bullets
-      bullet_text=$(echo "$bullet_text" | sed "s/\`\([^\`]*\)\`/$(printf "${COLOR_YELLOW}")\1$(printf "${COLOR_RESET}")/g")
-      printf "${COLOR_GREEN}  • ${COLOR_RESET}%b\n" "$bullet_text"
+      bullet_text=$(echo "$bullet_text" | sed "s/\`\([^\`]*\)\`/$(printf "${AISHA_COLOR_YELLOW}")\1$(printf "${AISHA_COLOR_RESET}")/g")
+      printf "${AISHA_COLOR_GREEN}  • ${AISHA_COLOR_RESET}%b\n" "$bullet_text"
       continue
     fi
 
@@ -207,8 +235,8 @@ _ai_render_markdown() {
       num="${line%%.*}"
       num="${num#"${num%%[![:space:]]*}"}"
       rest="${line#*[0-9]. }"
-      rest=$(echo "$rest" | sed "s/\`\([^\`]*\)\`/$(printf "${COLOR_YELLOW}")\1$(printf "${COLOR_RESET}")/g")
-      printf "${COLOR_CYAN}  %s.${COLOR_RESET} %b\n" "$num" "$rest"
+      rest=$(echo "$rest" | sed "s/\`\([^\`]*\)\`/$(printf "${AISHA_COLOR_YELLOW}")\1$(printf "${AISHA_COLOR_RESET}")/g")
+      printf "${AISHA_COLOR_CYAN}  %s.${AISHA_COLOR_RESET} %b\n" "$num" "$rest"
       continue
     fi
 
@@ -219,8 +247,8 @@ _ai_render_markdown() {
     fi
 
     # Normal text: render **bold** and `code`
-    line=$(echo "$line" | sed "s/\*\*\([^*]*\)\*\*/$(printf "${COLOR_BOLD}${COLOR_WHITE}")\1$(printf "${COLOR_RESET}")/g")
-    line=$(echo "$line" | sed "s/\`\([^\`]*\)\`/$(printf "${COLOR_YELLOW}")\1$(printf "${COLOR_RESET}")/g")
+    line=$(echo "$line" | sed "s/\*\*\([^*]*\)\*\*/$(printf "${AISHA_COLOR_BOLD}${AISHA_COLOR_WHITE}")\1$(printf "${AISHA_COLOR_RESET}")/g")
+    line=$(echo "$line" | sed "s/\`\([^\`]*\)\`/$(printf "${AISHA_COLOR_YELLOW}")\1$(printf "${AISHA_COLOR_RESET}")/g")
     printf "  %b\n" "$line"
   done
 }
@@ -235,33 +263,35 @@ _ai_render_markdown() {
 _ai_confirm_and_run() {
   local cmd="$1"
 
-  if echo "$cmd" | grep -Eq "$_AI_RISKY_RE"; then
-    echo -e "${COLOR_RED}⚠️  Risky command detected.${COLOR_RESET}"
+  if echo "$cmd" | grep -Eq "$_AISHA_RISKY_RE"; then
+    echo -e "${AISHA_COLOR_RED}⚠️  Risky command detected.${AISHA_COLOR_RESET}"
     echo -n "Type YES to execute (Ctrl+C to abort): "
     read -r confirm
     if [[ "$confirm" != "YES" ]]; then
-      echo -e "${COLOR_YELLOW}Aborted.${COLOR_RESET}"
+      echo -e "${AISHA_COLOR_YELLOW}Aborted.${AISHA_COLOR_RESET}"
       return 0
     fi
   else
-    echo -n -e "${COLOR_GREEN}Execute this command? [Y/n]:${COLOR_RESET} "
+    echo -n -e "${AISHA_COLOR_GREEN}Execute this command? [Y/n]:${AISHA_COLOR_RESET} "
     read -r confirm
     confirm=${confirm:-Y}
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-      echo -e "${COLOR_YELLOW}Aborted.${COLOR_RESET}"
+      echo -e "${AISHA_COLOR_YELLOW}Aborted.${AISHA_COLOR_RESET}"
       return 0
     fi
   fi
 
-  # Force color output for common commands
+  # Force color output for common commands (restore any pre-existing value after)
+  local prev_clicolor_force="${CLICOLOR_FORCE-__aisha_unset__}"
   if echo "$cmd" | grep -qE '^(ls|grep|diff|tree)'; then
     export CLICOLOR_FORCE=1
   fi
 
   # Interactive/curses commands get garbled when piped through tee.
   # Detect them and run directly, saving output only for non-interactive cmds.
-  local _ai_interactive=false\n  local exit_code
-  if echo "$cmd" | grep -qE "$_AI_INTERACTIVE_RE"; then
+  local _ai_interactive=false
+  local exit_code
+  if echo "$cmd" | grep -qE "$_AISHA_INTERACTIVE_RE"; then
     _ai_interactive=true
   fi
 
@@ -269,16 +299,21 @@ _ai_confirm_and_run() {
     eval "$cmd"
     exit_code=$?
   else
-    eval "$cmd" 2>&1 | tee "/tmp/ai/last_output.txt"
+    eval "$cmd" 2>&1 | tee "$AISHA_SESSION_DIR/last_output.txt"
     if [[ -n "$ZSH_VERSION" ]]; then
+      # shellcheck disable=SC2154  # pipestatus is zsh's lowercase PIPESTATUS
       exit_code=${pipestatus[1]}
     else
       exit_code=${PIPESTATUS[0]}
     fi
   fi
 
-  unset CLICOLOR_FORCE
-  return $exit_code
+  if [[ "$prev_clicolor_force" == "__aisha_unset__" ]]; then
+    unset CLICOLOR_FORCE
+  else
+    export CLICOLOR_FORCE="$prev_clicolor_force"
+  fi
+  return "$exit_code"
 }
 
 
@@ -315,8 +350,7 @@ _ai_tool_web_fetch() {
   local url="$1"
   if command -v curl &>/dev/null; then
     local output
-    output=$(curl -sL --fail --max-time 15 "$url" 2>&1)
-    if [[ $? -ne 0 ]]; then
+    if ! output=$(curl -sL --fail --max-time 15 "$url" 2>&1); then
       echo "ERROR: Failed to fetch $url"
       [[ -n "$output" ]] && echo "$output"
       return 1
@@ -449,11 +483,11 @@ _ai_agent_header() {
   local mode_label="auto"
   [[ "$mode" == "safe" ]] && mode_label="safe 🔒"
   echo
-  echo -e "${COLOR_CYAN}╔══════════════════════════════════════════════════════════╗${COLOR_RESET}"
-  echo -e "${COLOR_CYAN}║${COLOR_RESET}  ${COLOR_WHITE}🤖 Agent Mode${COLOR_RESET} ${COLOR_DIM}($mode_label)${COLOR_RESET}"
-  echo -e "${COLOR_CYAN}║${COLOR_RESET}  ${COLOR_BOLD}$goal${COLOR_RESET}"
-  echo -e "${COLOR_CYAN}║${COLOR_RESET}  ${COLOR_DIM}Max steps: $max_steps │ Ctrl+C to abort${COLOR_RESET}"
-  echo -e "${COLOR_CYAN}╚══════════════════════════════════════════════════════════╝${COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}╔══════════════════════════════════════════════════════════╗${AISHA_COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}║${AISHA_COLOR_RESET}  ${AISHA_COLOR_WHITE}🤖 Agent Mode${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}($mode_label)${AISHA_COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}║${AISHA_COLOR_RESET}  ${AISHA_COLOR_BOLD}$goal${AISHA_COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}║${AISHA_COLOR_RESET}  ${AISHA_COLOR_DIM}Max steps: $max_steps │ Ctrl+C to abort${AISHA_COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}╚══════════════════════════════════════════════════════════╝${AISHA_COLOR_RESET}"
   echo
 }
 
@@ -461,14 +495,15 @@ _ai_agent_header() {
 _ai_agent_step_header() {
   local iteration="$1" max_steps="$2" label="$3" action="$4"
   local pct=$((iteration * 100 / max_steps))
-  local filled=$((pct / 5)) empty=$((20 - filled))
+  local filled=$((pct / 5))
+  local empty=$((20 - filled))
   local bar=""
   for ((i=0; i<filled; i++)); do bar+="█"; done
   for ((i=0; i<empty; i++)); do bar+="░"; done
 
-  echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
-  echo -e "${COLOR_CYAN}  $label${COLOR_RESET} ${COLOR_DIM}step $iteration/$max_steps${COLOR_RESET}  ${COLOR_DIM}[$bar]${COLOR_RESET} ${COLOR_DIM}${pct}%${COLOR_RESET}"
-  echo -e "  ${COLOR_YELLOW}❯ $action${COLOR_RESET}"
+  echo -e "${AISHA_COLOR_DIM}──────────────────────────────────────────────────────────${AISHA_COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}  $label${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}step $iteration/$max_steps${AISHA_COLOR_RESET}  ${AISHA_COLOR_DIM}[$bar]${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}${pct}%${AISHA_COLOR_RESET}"
+  echo -e "  ${AISHA_COLOR_YELLOW}❯ $action${AISHA_COLOR_RESET}"
 }
 
 # ---- Display: command output with box drawing ----
@@ -477,19 +512,19 @@ _ai_agent_show_output() {
   local line_count
   line_count=$(echo "$output" | wc -l | tr -d ' ')
 
-  echo -e "${COLOR_DIM}  ┌─ output ──────────────────────────────────────────────${COLOR_RESET}"
+  echo -e "${AISHA_COLOR_DIM}  ┌─ output ──────────────────────────────────────────────${AISHA_COLOR_RESET}"
   if [[ -n "$output" ]]; then
     echo "$output" | head -10 | sed 's/^/  │ /'
-    [[ "$line_count" -gt 10 ]] && echo -e "  │ ${COLOR_DIM}... ($((line_count - 10)) more lines)${COLOR_RESET}"
+    [[ "$line_count" -gt 10 ]] && echo -e "  │ ${AISHA_COLOR_DIM}... ($((line_count - 10)) more lines)${AISHA_COLOR_RESET}"
   else
-    echo -e "  │ ${COLOR_DIM}(no output)${COLOR_RESET}"
+    echo -e "  │ ${AISHA_COLOR_DIM}(no output)${AISHA_COLOR_RESET}"
   fi
-  echo -e "${COLOR_DIM}  └──────────────────────────────────────────────────────${COLOR_RESET}"
+  echo -e "${AISHA_COLOR_DIM}  └──────────────────────────────────────────────────────${AISHA_COLOR_RESET}"
 
   if [[ "$exit_code" -ne 0 ]]; then
-    echo -e "  ${COLOR_RED}✗ exit code $exit_code${COLOR_RESET}"
+    echo -e "  ${AISHA_COLOR_RED}✗ exit code $exit_code${AISHA_COLOR_RESET}"
   else
-    echo -e "  ${COLOR_GREEN}✓ ok${COLOR_RESET}"
+    echo -e "  ${AISHA_COLOR_GREEN}✓ ok${AISHA_COLOR_RESET}"
   fi
   echo
 }
@@ -506,15 +541,15 @@ _ai_agent_exec_cmd() {
 
   # Risky commands always require confirmation, regardless of mode
   local is_risky=false
-  echo "$cmd" | grep -Eq "$_AI_RISKY_RE" && is_risky=true
+  echo "$cmd" | grep -Eq "$_AISHA_RISKY_RE" && is_risky=true
 
   if $is_risky; then
-    echo -e "  ${COLOR_RED}⚠️  Risky command — requires explicit approval${COLOR_RESET}"
-    echo -n -e "  ${COLOR_RED}Type YES to execute, or 'skip' to skip:${COLOR_RESET} "
+    echo -e "  ${AISHA_COLOR_RED}⚠️  Risky command — requires explicit approval${AISHA_COLOR_RESET}"
+    echo -n -e "  ${AISHA_COLOR_RED}Type YES to execute, or 'skip' to skip:${AISHA_COLOR_RESET} "
     read -r confirm
     if [[ "$confirm" == "skip" ]]; then
       _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "SKIPPED by user (risky)" "skipped"
-      echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+      echo -e "  ${AISHA_COLOR_YELLOW}⏭  Skipped${AISHA_COLOR_RESET}"
       echo
       return 2
     elif [[ "$confirm" != "YES" ]]; then
@@ -522,12 +557,12 @@ _ai_agent_exec_cmd() {
       return 1
     fi
   elif [[ "$mode" == "safe" ]]; then
-    echo -n -e "  ${COLOR_GREEN}Execute? [Y/n/skip]:${COLOR_RESET} "
+    echo -n -e "  ${AISHA_COLOR_GREEN}Execute? [Y/n/skip]:${AISHA_COLOR_RESET} "
     read -r confirm
     confirm=${confirm:-Y}
     if [[ "$confirm" =~ ^[Ss] ]]; then
       _ai_agent_save_checkpoint "$agentdir" "$iteration" "$cmd" "SKIPPED by user" "skipped"
-      echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+      echo -e "  ${AISHA_COLOR_YELLOW}⏭  Skipped${AISHA_COLOR_RESET}"
       echo
       return 2
     elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -538,7 +573,7 @@ _ai_agent_exec_cmd() {
 
   # Execute — interactive/curses commands run directly, others capture output
   local cmd_output cmd_exit step_status
-  if echo "$cmd" | grep -qE "$_AI_INTERACTIVE_RE"; then
+  if echo "$cmd" | grep -qE "$_AISHA_INTERACTIVE_RE"; then
     eval "$cmd"
     cmd_exit=$?
     cmd_output="(interactive command — output not captured)"
@@ -565,7 +600,7 @@ _ai_agent_system_prompt() {
   local step="$1" max_steps="$2" total="$3"
   cat <<EOF
 You are an autonomous shell agent working toward a goal.
-The user's OS is: $AI_OS
+The user's OS is: $AISHA_OS
 
 The goal is in the attached goal.txt.
 
@@ -600,20 +635,21 @@ _ai_agent() {
   shift
   local goal="$*"
 
-  local agentdir="/tmp/ai/agent"
-  local max_steps="${AI_AGENT_MAX_STEPS:-15}"
+  _ai_state_init
+  local agentdir="$AISHA_SESSION_DIR/agent"
+  local max_steps="${AISHA_AGENT_MAX_STEPS:-15}"
 
   # ---- Resume or fresh start ----
   local resume=false
   if [[ "$goal" == "--resume" ]]; then
     resume=true
     if [[ ! -f "$agentdir/goal.txt" ]]; then
-      echo -e "${COLOR_RED}No agent session to resume.${COLOR_RESET}"
+      echo -e "${AISHA_COLOR_RED}No agent session to resume.${AISHA_COLOR_RESET}"
       return 1
     fi
     goal=$(cat "$agentdir/goal.txt")
     mode=$(cat "$agentdir/mode.txt" 2>/dev/null || echo "auto")
-    echo -e "${COLOR_CYAN}🔄 Resuming agent session...${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_CYAN}🔄 Resuming agent session...${AISHA_COLOR_RESET}"
   else
     rm -rf "$agentdir"
     mkdir -p "$agentdir/checkpoints"
@@ -624,15 +660,14 @@ _ai_agent() {
   local start_step=0
   if $resume; then
     start_step=$(_ai_agent_load_checkpoint "$agentdir")
-    echo -e "  ${COLOR_DIM}Picking up from step $start_step${COLOR_RESET}"
+    echo -e "  ${AISHA_COLOR_DIM}Picking up from step $start_step${AISHA_COLOR_RESET}"
   fi
 
   _ai_agent_header "$mode" "$goal" "$max_steps"
 
   # Capture initial context
-  local ctxdir="/tmp/ai/last_context"
-  local last_exit
-  _ai_capture_context "$ctxdir"
+  local ctxdir="$AISHA_SESSION_DIR/last_context"
+  _ai_capture_context "$ctxdir" 0
 
   # ---- Step loop ----
   # Outer loop: allows continuation after hitting max_steps
@@ -649,13 +684,13 @@ _ai_agent() {
       # Build rolling history (last 5 steps)
       _ai_agent_get_history "$agentdir" 5 > "$agentdir/history_context.txt"
 
-      echo -ne "${COLOR_DIM}  ⏳ Thinking...${COLOR_RESET}\r"
+      echo -ne "${AISHA_COLOR_DIM}  ⏳ Thinking...${AISHA_COLOR_RESET}\r"
 
       # ---- Ask LLM for next action ----
       local _agent_prompt
       _agent_prompt=$(_ai_agent_system_prompt "$iteration" "$max_steps" "$total_steps")
 
-      _resp=$(llm -m "$AI_MODEL_TASK" \
+      _resp=$(llm -m "$AISHA_MODEL_TASK" \
         -f "$ctxdir/pwd.txt" \
         -f "$ctxdir/git.txt" \
         -f "$agentdir/goal.txt" \
@@ -671,12 +706,12 @@ _ai_agent() {
         local summary="${_resp#DONE:}"
         summary="${summary#"${summary%%[![:space:]]*}"}"
         _ai_agent_save_checkpoint "$agentdir" "$iteration" "DONE" "$summary" "done"
-        echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+        echo -e "${AISHA_COLOR_DIM}──────────────────────────────────────────────────────────${AISHA_COLOR_RESET}"
         echo
-        echo -e "  ${COLOR_GREEN}✅ Done!${COLOR_RESET} ${COLOR_DIM}Completed in $total_steps step(s)${COLOR_RESET}"
-        echo -e "  ${COLOR_WHITE}$summary${COLOR_RESET}"
+        echo -e "  ${AISHA_COLOR_GREEN}✅ Done!${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}Completed in $total_steps step(s)${AISHA_COLOR_RESET}"
+        echo -e "  ${AISHA_COLOR_WHITE}$summary${AISHA_COLOR_RESET}"
         echo
-        echo -e "  ${COLOR_DIM}📋 Log: $agentdir/agent_log.txt${COLOR_RESET}"
+        echo -e "  ${AISHA_COLOR_DIM}📋 Log: $agentdir/agent_log.txt${AISHA_COLOR_RESET}"
         echo
         return 0
 
@@ -685,12 +720,12 @@ _ai_agent() {
         local reason="${_resp#FAILED:}"
         reason="${reason#"${reason%%[![:space:]]*}"}"
         _ai_agent_save_checkpoint "$agentdir" "$iteration" "FAILED" "$reason" "failed"
-        echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+        echo -e "${AISHA_COLOR_DIM}──────────────────────────────────────────────────────────${AISHA_COLOR_RESET}"
         echo
-        echo -e "  ${COLOR_RED}❌ Failed at step $iteration${COLOR_RESET}"
-        echo -e "  ${COLOR_YELLOW}$reason${COLOR_RESET}"
+        echo -e "  ${AISHA_COLOR_RED}❌ Failed at step $iteration${AISHA_COLOR_RESET}"
+        echo -e "  ${AISHA_COLOR_YELLOW}$reason${AISHA_COLOR_RESET}"
         echo
-        echo -e "  ${COLOR_DIM}💡 Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+        echo -e "  ${AISHA_COLOR_DIM}💡 Resume with:${AISHA_COLOR_RESET} ${AISHA_COLOR_CYAN}ai --agent --resume${AISHA_COLOR_RESET}"
         echo
         return 1
 
@@ -699,18 +734,18 @@ _ai_agent() {
         _ai_agent_step_header "$iteration" "$max_steps" "🔧 Tool" "$_resp"
 
         if [[ "$mode" == "safe" ]]; then
-          echo -n -e "  ${COLOR_GREEN}Allow? [Y/n/skip]:${COLOR_RESET} "
+          echo -n -e "  ${AISHA_COLOR_GREEN}Allow? [Y/n/skip]:${AISHA_COLOR_RESET} "
           read -r confirm
           confirm=${confirm:-Y}
           if [[ "$confirm" =~ ^[Ss] ]]; then
             _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "SKIPPED by user" "skipped"
-            echo -e "  ${COLOR_YELLOW}⏭  Skipped${COLOR_RESET}"
+            echo -e "  ${AISHA_COLOR_YELLOW}⏭  Skipped${AISHA_COLOR_RESET}"
             echo
             continue
           elif [[ ! "$confirm" =~ ^[Yy]$ ]]; then
             _ai_agent_save_checkpoint "$agentdir" "$iteration" "$_resp" "ABORTED by user" "aborted"
             echo
-            echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+            echo -e "  ${AISHA_COLOR_YELLOW}Agent paused.${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}Resume with:${AISHA_COLOR_RESET} ${AISHA_COLOR_CYAN}ai --agent --resume${AISHA_COLOR_RESET}"
             echo
             return 1
           fi
@@ -735,7 +770,7 @@ _ai_agent() {
         exec_result=$?
         if [[ $exec_result -eq 1 ]]; then
           echo
-          echo -e "  ${COLOR_YELLOW}Agent paused.${COLOR_RESET} ${COLOR_DIM}Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+          echo -e "  ${AISHA_COLOR_YELLOW}Agent paused.${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}Resume with:${AISHA_COLOR_RESET} ${AISHA_COLOR_CYAN}ai --agent --resume${AISHA_COLOR_RESET}"
           echo
           return 1
         elif [[ $exec_result -eq 2 ]]; then
@@ -745,21 +780,21 @@ _ai_agent() {
     done   # ← end step loop
 
     # ---- Max steps reached — offer continuation ----
-    echo -e "${COLOR_DIM}──────────────────────────────────────────────────────────${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_DIM}──────────────────────────────────────────────────────────${AISHA_COLOR_RESET}"
     echo
-    echo -e "  ${COLOR_YELLOW}⚠️  Reached max steps ($max_steps) without completing goal.${COLOR_RESET}"
-    echo -n -e "  ${COLOR_GREEN}Continue for another $max_steps steps? [Y/n]:${COLOR_RESET} "
+    echo -e "  ${AISHA_COLOR_YELLOW}⚠️  Reached max steps ($max_steps) without completing goal.${AISHA_COLOR_RESET}"
+    echo -n -e "  ${AISHA_COLOR_GREEN}Continue for another $max_steps steps? [Y/n]:${AISHA_COLOR_RESET} "
     read -r confirm
     confirm=${confirm:-Y}
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
       iteration=0
       echo
-      echo -e "  ${COLOR_CYAN}↻ Continuing...${COLOR_RESET} ${COLOR_DIM}(total steps so far: $total_steps)${COLOR_RESET}"
+      echo -e "  ${AISHA_COLOR_CYAN}↻ Continuing...${AISHA_COLOR_RESET} ${AISHA_COLOR_DIM}(total steps so far: $total_steps)${AISHA_COLOR_RESET}"
       echo
     else
       echo
-      echo -e "  ${COLOR_DIM}Stopped after $total_steps total step(s).${COLOR_RESET}"
-      echo -e "  ${COLOR_DIM}💡 Resume with:${COLOR_RESET} ${COLOR_CYAN}ai --agent --resume${COLOR_RESET}"
+      echo -e "  ${AISHA_COLOR_DIM}Stopped after $total_steps total step(s).${AISHA_COLOR_RESET}"
+      echo -e "  ${AISHA_COLOR_DIM}💡 Resume with:${AISHA_COLOR_RESET} ${AISHA_COLOR_CYAN}ai --agent --resume${AISHA_COLOR_RESET}"
       echo
       return 1
     fi
@@ -771,39 +806,44 @@ _ai_agent() {
 # 9. MAIN ENTRY POINT
 # ============================================================================
 
+# $1 is the exit code of the user's previous command, forwarded by ai()
+# before anything else can overwrite $?.
 _ai() {
-  local tmpdir="/tmp/ai"
+  local last_exit="${1:-0}"
+  shift
+
+  _ai_state_init
+  local tmpdir="$AISHA_SESSION_DIR"
   local ctxdir="$tmpdir/last_context"
-  mkdir -p "$tmpdir" "$ctxdir"
 
   # ---- Subcommand: redo ----
-  if [[ "$1" == "redo" ]]; then
+  if [[ "$1" == "redo" && $# -eq 1 ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
-      echo -e "${COLOR_RED}No previous AI suggestion to redo.${COLOR_RESET}"
+      echo -e "${AISHA_COLOR_RED}No previous AI suggestion to redo.${AISHA_COLOR_RESET}"
       return 1
     fi
     local cmd; cmd=$(cat "$tmpdir/last_command.txt")
-    echo -e "${COLOR_CYAN}Redoing last suggested command:${COLOR_RESET}"
-    echo -e "  ${COLOR_YELLOW}$cmd${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_CYAN}Redoing last suggested command:${AISHA_COLOR_RESET}"
+    echo -e "  ${AISHA_COLOR_YELLOW}$cmd${AISHA_COLOR_RESET}"
     echo
     _ai_confirm_and_run "$cmd"
     return $?
   fi
 
-  # ---- Subcommand: explain ----
-  if [[ "$1" == "explain" ]]; then
+  # ---- Subcommand: explain (bare only — "explain <question>" falls through) ----
+  if [[ "$1" == "explain" && $# -eq 1 ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
-      echo -e "${COLOR_RED}No previous AI suggestion to explain.${COLOR_RESET}"
+      echo -e "${AISHA_COLOR_RED}No previous AI suggestion to explain.${AISHA_COLOR_RESET}"
       return 1
     fi
-    llm -m "$AI_MODEL_THINKING" \
+    llm -m "$AISHA_MODEL_THINKING" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
       -f "$ctxdir/exit.txt" \
       -f "$tmpdir/last_command.txt" \
       -f "$tmpdir/last_prompt.txt" \
-      "You are an expert sysadmin. The user's OS is: $AI_OS
+      "You are an expert sysadmin. The user's OS is: $AISHA_OS
 Explain why the command in last_command.txt was suggested, what it does, and any risks.
 The original user intent is in last_prompt.txt." | _ai_render_markdown
     return
@@ -829,12 +869,11 @@ The original user intent is in last_prompt.txt." | _ai_render_markdown
   [[ -n "$prompt" ]] && echo "$prompt" > "$tmpdir/last_prompt.txt"
 
   # ---- Capture context ----
-  local last_exit
-  _ai_capture_context "$ctxdir"
+  _ai_capture_context "$ctxdir" "$last_exit"
 
   # ---- Auto-fix: empty prompt + previous command failed ----
   if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
-    llm -m "$AI_MODEL_THINKING" \
+    llm -m "$AISHA_MODEL_THINKING" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -849,7 +888,7 @@ Do not execute commands." | _ai_render_markdown
 
   # ---- Interactive fallback (e.g. if apostrophes broke argument parsing) ----
   if [[ -z "$prompt" ]]; then
-    echo -n -e "${COLOR_CYAN}Ask: ${COLOR_RESET}"
+    echo -n -e "${AISHA_COLOR_CYAN}Ask: ${AISHA_COLOR_RESET}"
     read -r prompt
     [[ -z "$prompt" ]] && return 0
   fi
@@ -898,7 +937,7 @@ Rules:
 
   if [[ -z "$response" ]]; then
     echo
-    echo -e "${COLOR_YELLOW}No response available.${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_YELLOW}No response available.${AISHA_COLOR_RESET}"
     return 0
   fi
 
@@ -907,7 +946,7 @@ Rules:
     local answer="${response#ANSWER:}"
     answer="${answer#"${answer%%[![:space:]]*}"}"
     echo
-    echo -e "${COLOR_CYAN}$answer${COLOR_RESET}"
+    echo -e "${AISHA_COLOR_CYAN}$answer${AISHA_COLOR_RESET}"
     return 0
   fi
 
@@ -916,15 +955,16 @@ Rules:
   echo "$persona" > "$tmpdir/last_persona.txt"
 
   echo
-  echo -e "${COLOR_CYAN}Suggested command:${COLOR_RESET}"
-  echo -e "  ${COLOR_YELLOW}$response${COLOR_RESET}"
+  echo -e "${AISHA_COLOR_CYAN}Suggested command:${AISHA_COLOR_RESET}"
+  echo -e "  ${AISHA_COLOR_YELLOW}$response${AISHA_COLOR_RESET}"
   echo
 
   _ai_confirm_and_run "$response"
 }
 
-# Public alias
-ai() { _ai "$@"; }
+# Public alias. Capturing $? here, before any other command runs, is the only
+# way to see the exit code of the command the user ran before invoking ai.
+ai() { _ai "$?" "$@"; }
 
 
 # ============================================================================
@@ -940,6 +980,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
   _ai_accept_line() {
     if [[ "$BUFFER" =~ ^ai[[:space:]] && "$BUFFER" == *"'"* ]]; then
       BUFFER="${BUFFER//\'/ʼ}"
+      # shellcheck disable=SC2034  # CURSOR is read by zle
       CURSOR=${#BUFFER}
     fi
     zle .accept-line

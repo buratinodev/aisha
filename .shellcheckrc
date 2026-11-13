@@ -1,0 +1,12 @@
+# aisha shellcheck policy
+#
+# Disabled checks (style/info level, intentional patterns):
+#   SC2001 — sed-based substitutions are used deliberately where the patterns
+#            (backrefs, char classes) exceed ${var//…} capabilities
+#   SC2012 — ls is used on controlled, self-generated filenames (step_N.json)
+#   SC2016 — single-quoted $HOME in the installer is intentional: the rc-file
+#            snippet must expand at shell startup, not at install time
+#   SC2059 — ANSI color variables are deliberately placed in printf format
+#            strings; arguments are never user-controlled format strings
+#   SC2129 — individual >> redirects in the installer favor readability
+disable=SC2001,SC2012,SC2016,SC2059,SC2129

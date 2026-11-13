@@ -106,7 +106,7 @@ You need the `llm` CLI tool with a configured model:
    ollama pull qwen3:32b          # Thinking model (deep analysis)
    ```
 
-   Or modify the script to use different models by changing `AI_MODEL_TASK` and `AI_MODEL_THINKING` at the top of the script.
+   Or use different models by exporting `AISHA_MODEL_TASK` and `AISHA_MODEL_THINKING` in your shell rc file before the aisha loader.
 
 ## Usage
 
@@ -330,58 +330,77 @@ These features are invisible in normal use — just type naturally.
 
 ## File Structure
 
+State lives under `${XDG_STATE_HOME:-~/.local/state}/aisha/`. Each shell
+session gets its own directory (keyed by shell PID), so concurrent terminals
+never clobber each other's suggestions, context, or agent checkpoints. A
+`latest` symlink always points at the most recently active session, and stale
+session directories from closed shells are pruned automatically.
+
 ```
-/tmp/ai/
-├── last_command.txt    # Last suggested command
-├── last_prompt.txt     # Original user intent (passed to LLM via -f)
-├── last_persona.txt    # Persona used (sysadmin/deep)
-├── last_output.txt     # Output from last execution
-├── last_context/
-│   ├── history.txt     # Last 15 shell commands
-│   ├── pwd.txt         # Current directory
-│   ├── git.txt         # Git status
-│   └── exit.txt        # Last exit code
-└── agent/              # Agent mode state
-    ├── goal.txt            # Agent goal (passed to LLM via -f)
-    ├── mode.txt            # Agent mode (auto/safe)
-    ├── history_context.txt # Rolling context (last 5 steps, truncated)
-    ├── agent_log.txt       # Cumulative log
-    └── checkpoints/
-        ├── step_1.json         # Per-step metadata
-        ├── step_1_output.txt   # Step output
-        ├── step_2.json
-        └── step_2_output.txt
+~/.local/state/aisha/
+├── latest -> session-<pid>     # Most recently active session
+└── session-<pid>/
+    ├── last_command.txt    # Last suggested command
+    ├── last_prompt.txt     # Original user intent (passed to LLM via -f)
+    ├── last_persona.txt    # Persona used (sysadmin/deep)
+    ├── last_output.txt     # Output from last execution
+    ├── last_context/
+    │   ├── history.txt     # Last 15 shell commands
+    │   ├── pwd.txt         # Current directory
+    │   ├── git.txt         # Git status
+    │   └── exit.txt        # Last exit code
+    └── agent/              # Agent mode state
+        ├── goal.txt            # Agent goal (passed to LLM via -f)
+        ├── mode.txt            # Agent mode (auto/safe)
+        ├── history_context.txt # Rolling context (last 5 steps, truncated)
+        ├── agent_log.txt       # Cumulative log
+        └── checkpoints/
+            ├── step_1.json         # Per-step metadata
+            ├── step_1_output.txt   # Step output
+            ├── step_2.json
+            └── step_2_output.txt
 ```
 
 ## Customization
 
-### Change the LLM Models
-Edit the model variables at the top of the script:
+All settings are environment variables with sensible defaults — export them in
+your shell rc file *before* the aisha loader to override, no script editing
+needed:
+
 ```bash
-AI_MODEL_TASK="qwen3-coder:30b"       # Fast model for command suggestions & agent steps
-AI_MODEL_THINKING="qwen3:32b"         # Reasoning model for deep analysis & explanations
+export AISHA_MODEL_TASK="llama3.3:70b"
+# Load AI shell helpers
+if [[ -f "$HOME/.aisha" ]]; then
+  source "$HOME/.aisha"
+fi
+```
+
+### Change the LLM Models
+```bash
+AISHA_MODEL_TASK="qwen3-coder:30b"       # Fast model for command suggestions & agent steps
+AISHA_MODEL_THINKING="qwen3:32b"         # Reasoning model for deep analysis & explanations
 ```
 
 | Feature | Model Used |
 |---------|------------|
-| Command suggestions | `AI_MODEL_TASK` |
-| Conversational queries | `AI_MODEL_TASK` |
-| `--deep` mode | `AI_MODEL_THINKING` |
-| how/why/what/explain queries | `AI_MODEL_THINKING` |
-| `ai explain` | `AI_MODEL_THINKING` |
-| Auto-fix (failed commands) | `AI_MODEL_THINKING` |
-| Agent mode | `AI_MODEL_TASK` |
+| Command suggestions | `AISHA_MODEL_TASK` |
+| Conversational queries | `AISHA_MODEL_TASK` |
+| `--deep` mode | `AISHA_MODEL_THINKING` |
+| how/why/what/explain queries | `AISHA_MODEL_THINKING` |
+| `ai explain` | `AISHA_MODEL_THINKING` |
+| Auto-fix (failed commands) | `AISHA_MODEL_THINKING` |
+| Agent mode | `AISHA_MODEL_TASK` |
 
 ### Agent Settings
 
 Adjust the maximum steps per batch before the agent asks to continue:
 ```bash
-AI_AGENT_MAX_STEPS=15
+AISHA_AGENT_MAX_STEPS=15
 ```
 
 Configure which tools the agent can use:
 ```bash
-AI_AGENT_TOOLS="command,read_file,write_file,search,web_fetch"
+AISHA_AGENT_TOOLS="command,read_file,write_file,search,web_fetch"
 ```
 
 ### Adjust Safety Rules
@@ -390,17 +409,17 @@ Modify the risky command detection regex in the `_ai_confirm_and_run` function t
 ### Customize Colors
 Change the color definitions at the top of the script:
 ```bash
-COLOR_RED="\033[1;31m"
-COLOR_GREEN="\033[1;32m"
-COLOR_YELLOW="\033[1;33m"
-COLOR_CYAN="\033[1;36m"
-COLOR_RESET="\033[0m"
+AISHA_COLOR_RED="\033[1;31m"
+AISHA_COLOR_GREEN="\033[1;32m"
+AISHA_COLOR_YELLOW="\033[1;33m"
+AISHA_COLOR_CYAN="\033[1;36m"
+AISHA_COLOR_RESET="\033[0m"
 ```
 
 Set them to empty strings to disable colors:
 ```bash
-COLOR_RED=""
-COLOR_GREEN=""
+AISHA_COLOR_RED=""
+AISHA_COLOR_GREEN=""
 # ... etc
 ```
 
@@ -414,6 +433,16 @@ Add new persona modes by extending the persona flag logic around line 52.
 - Two LLM models via Ollama (defaults: `qwen3-coder:30b` for tasks, `qwen3:32b` for thinking)
 - Basic Unix tools: `grep`, `tee`, `mkdir`, `cat`, `sed`
 - `python3` (used for JSON escaping in agent checkpoints)
+
+## Development
+
+```bash
+make check   # shellcheck (lint policy in .shellcheckrc)
+make test    # bats test suite (the llm CLI is stubbed — no models needed)
+```
+
+Install the tooling with `brew install shellcheck bats-core` (macOS) or
+`apt-get install shellcheck bats` (Debian/Ubuntu). CI runs both on every push.
 
 ## License
 
