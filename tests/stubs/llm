@@ -9,6 +9,12 @@ if [[ -n "$AISHA_TEST_LLM_LOG" ]]; then
   printf 'ARGS: %s\n' "$*" >> "$AISHA_TEST_LLM_LOG"
 fi
 
+# Simulate a model/plugin without thinking support
+if [[ -n "$AISHA_TEST_LLM_NO_THINK" && " $* " == *" -o think "* ]]; then
+  echo 'Error: "test-model" does not support thinking (status code: 400)' >&2
+  exit 1
+fi
+
 if [[ -n "$AISHA_TEST_LLM_QUEUE" && -s "$AISHA_TEST_LLM_QUEUE" ]]; then
   python3 - "$AISHA_TEST_LLM_QUEUE" <<'EOF'
 import sys

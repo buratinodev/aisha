@@ -25,16 +25,17 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
 # ============================================================================
 
 DEFAULTS = {
-    # Defaults sized for ~48GB Apple Silicon; see README for a 16GB tier
-    "AISHA_MODEL_TASK": "qwen3.6:35b-mlx",
-    "AISHA_MODEL_THINKING": "gemma4:31b-mlx",
+    # One resident model; modes differ by prompt and thinking (see MODES)
+    "AISHA_MODEL": "gemma4:e4b-mlx",
+    "AISHA_THINK": "auto",   # auto (per mode) | on | off
+    "AISHA_REVIEW": "1",     # second-pass review of risky/config-editing commands
     "AISHA_AUTORUN": "0",
     "AISHA_STDIN_CONTEXT": "1",
     "AISHA_AGENT_MAX_STEPS": "15",
@@ -44,17 +45,15 @@ DEFAULTS = {
 }
 
 
-def load_config():
-    cfg = dict(DEFAULTS)
-    cfg.update({k: v for k, v in os.environ.items() if k.startswith("AISHA_")})
-    path = cfg.get("AISHA_CONFIG_FILE") or os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-        "aisha", "config")
-    cfg["AISHA_CONFIG_FILE"] = path
+CONFIG_LINE_RE = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+
+
+def parse_config_file(path):
+    vals = {}
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
-                m = re.match(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$', line)
+                m = CONFIG_LINE_RE.match(line)
                 if not m:
                     continue
                 key, val = m.group(1), m.group(2).strip()
@@ -63,17 +62,36 @@ def load_config():
                     val = " ".join(parts) if parts else ""
                 except ValueError:
                     pass
-                cfg[key] = val
+                vals[key] = val
     except OSError:
         pass
+    return vals
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    cfg.update({k: v for k, v in os.environ.items() if k.startswith("AISHA_")})
+    path = cfg.get("AISHA_CONFIG_FILE") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+        "aisha", "config")
+    cfg["AISHA_CONFIG_FILE"] = path
+    cfg.update(parse_config_file(path))
     return cfg
 
 
 CFG = load_config()
 
+LEGACY_KEYS = ("AISHA_MODEL_TASK", "AISHA_MODEL_THINKING")
+
 
 def cfg(name):
     return CFG.get(name, DEFAULTS.get(name, ""))
+
+
+def warn_legacy():
+    if any(k in CFG for k in LEGACY_KEYS):
+        sys.stderr.write(f"{YELLOW}aisha: AISHA_MODEL_TASK/AISHA_MODEL_THINKING are no longer "
+                         f"used; set one model with: ai /config set AISHA_MODEL <name>{RESET}\n")
 
 
 # ---- Colors (overridable via AISHA_COLOR_*; values may use \033 escapes) ----
@@ -222,6 +240,59 @@ def is_risky(cmd):
     return False
 
 
+# Commands that modify config or system state: not necessarily destructive,
+# but a wrong path or flag silently breaks things, so they get reviewed.
+SENSITIVE_PATTERNS = [
+    r'\bsed\b[^|;&]*\s(-[a-zA-Z]*i|--in-place)',
+    r'\bperl\b[^|;&]*\s-[a-zA-Z]*i',
+    r'>>?\s*["\']?(~|\$HOME|/etc|/usr|/Library|/System|/opt|/var)\b',
+    r'>>?\s*["\']?\S*/\.[A-Za-z]',
+    r'\btee\b',
+    r'\b(chmod|chown|chgrp)\b',
+    r'\b(defaults\s+(write|delete)|launchctl|systemctl|crontab|visudo)\b',
+    r'\b(mv|cp|ln)\b[^|;&]*\s(~|\$HOME)?/?\.[A-Za-z]',
+    r'(^|\s)/etc/',
+]
+
+
+def needs_review(cmd):
+    if is_risky(cmd):
+        return True
+    return any(re.search(p, cmd) for p in SENSITIVE_PATTERNS)
+
+
+def review_command(cmd):
+    """Second, thinking pass over a risky or config-editing command.
+    Returns (verdict, reason, safer); verdict is 'OK', 'WARN', or '' (no review)."""
+    intent = read_file(spath("last_prompt.txt")).strip() or "(unknown)"
+    thinking_start()
+    raw = llm_capture("review", [], f"""You review shell commands before a user runs them. OS: {os_info()}
+{AISHA_SELF}
+
+User's request: {intent}
+Proposed command:
+{cmd}
+
+Check: does it do exactly what was asked, on the right files/paths, without unintended damage
+(wrong or overly broad paths, overwriting instead of appending, editing the wrong file,
+no backup of an edited config, GNU-only flags on macOS)?
+Reply with exactly one first line: OK  or  WARN: <one-sentence reason>
+If WARN and a safer command exists, add one line: SAFER: <command>
+Nothing else.""")
+    thinking_end()
+    text = re.sub(r'<think>.*?</think>', '', raw, flags=re.S).strip()
+    verdict, reason, safer = "", "", ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("WARN"):
+            verdict, reason = "WARN", line[4:].lstrip(":").strip()
+        elif line.startswith("OK") and not verdict:
+            verdict = "OK"
+        elif line.startswith("SAFER:"):
+            safer = line[6:].strip().strip("`")
+    return verdict, reason, safer
+
+
 # ============================================================================
 # Response post-processing & markdown rendering
 # ============================================================================
@@ -317,8 +388,37 @@ def render_markdown(text):
 # make it unfit for command suggestions; see IMPLEMENTATION_PLAN.md.)
 
 
-def llm_args(model, files, prompt):
+# Every mode uses the same model; they differ in prompt and thinking.
+# Thinking is on wherever a command may be executed (correctness over speed).
+MODES = {
+    "suggest": True,
+    "refine": True,
+    "agent": True,
+    "diagnose": True,
+    "deep": True,
+    "review": True,
+    "explain": False,
+    "tips": False,
+}
+
+# Models/plugins that reject the think option; retried without it.
+NO_THINK_MODELS = set()
+
+
+def think_for(mode):
+    setting = cfg("AISHA_THINK").lower()
+    if setting == "on":
+        return True
+    if setting == "off":
+        return False
+    return MODES[mode]
+
+
+def llm_args(mode, files, prompt, think=True):
+    model = cfg("AISHA_MODEL")
     args = ["llm", "-m", model]
+    if think and model not in NO_THINK_MODELS:
+        args += ["-o", "think", "true" if think_for(mode) else "false"]
     for f in files:
         if f and os.path.isfile(f):
             args += ["-f", f]
@@ -326,34 +426,52 @@ def llm_args(model, files, prompt):
     return args
 
 
-def llm_capture(model, files, prompt):
+def _think_rejected(rc, stderr):
+    if rc != 0 and "think" in stderr.lower():
+        NO_THINK_MODELS.add(cfg("AISHA_MODEL"))
+        return True
+    return False
+
+
+def llm_capture(mode, files, prompt):
     try:
-        r = subprocess.run(llm_args(model, files, prompt),
-                           stdout=subprocess.PIPE, text=True)
-        return r.stdout
+        for think in (True, False):
+            r = subprocess.run(llm_args(mode, files, prompt, think),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if think and _think_rejected(r.returncode, r.stderr):
+                continue
+            sys.stderr.write(r.stderr)
+            return r.stdout
     except FileNotFoundError:
         err("llm CLI not found — install it with: pip install llm")
-        return ""
+    return ""
 
 
-def llm_stream_render(model, files, prompt):
+def llm_stream_render(mode, files, prompt):
     """Stream llm output through the renderer; returns the full raw text."""
     env = dict(os.environ, PYTHONUNBUFFERED="1")
-    try:
-        p = subprocess.Popen(llm_args(model, files, prompt),
-                             stdout=subprocess.PIPE, text=True, env=env)
-    except FileNotFoundError:
-        err("llm CLI not found — install it with: pip install llm")
-        return ""
-    rend = MarkdownRenderer()
-    captured = []
-    assert p.stdout is not None
-    for line in p.stdout:
-        captured.append(line)
-        rend.feed(line.rstrip("\n"))
-        sys.stdout.flush()
-    p.wait()
-    return "".join(captured)
+    for think in (True, False):
+        try:
+            p = subprocess.Popen(llm_args(mode, files, prompt, think),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, env=env)
+        except FileNotFoundError:
+            err("llm CLI not found — install it with: pip install llm")
+            return ""
+        rend = MarkdownRenderer()
+        captured = []
+        assert p.stdout is not None and p.stderr is not None
+        for line in p.stdout:
+            captured.append(line)
+            rend.feed(line.rstrip("\n"))
+            sys.stdout.flush()
+        stderr = p.stderr.read()
+        rc = p.wait()
+        if think and not captured and _think_rejected(rc, stderr):
+            continue
+        sys.stderr.write(stderr)
+        return "".join(captured)
+    return ""
 
 
 def thinking_start():
@@ -420,17 +538,21 @@ def ctx_files(*names):
     return [os.path.join(CTX, n) for n in names]
 
 
+AISHA_SELF = (
+    "About aisha itself (the assistant you are part of): its settings are changed ONLY with "
+    "`ai /config set KEY VALUE` (e.g. `ai /config set AISHA_MODEL qwen3.5:9b-mlx`); "
+    "keys: AISHA_MODEL, AISHA_THINK, AISHA_REVIEW, AISHA_AUTORUN, AISHA_STDIN_CONTEXT, "
+    "AISHA_AGENT_MAX_STEPS, AISHA_RISKY_EXTRA, AISHA_RISKY_ALLOW. "
+    "Never edit ~/.aisha or ~/.aisha-core.py — those files are the program, not config.")
+
+
 def system_prompt(persona):
     if persona == "deep":
         return (f"You are a senior systems engineer. The user's OS is: {os_info()}\n"
                 "Think step-by-step, consider edge cases, tradeoffs, and failure modes.\n"
-                "Prefer correctness over speed.")
+                f"Prefer correctness over speed.\n{AISHA_SELF}")
     return (f"You are an expert Unix/Linux sysadmin. The user's OS is: {os_info()}\n"
-            "Be concise, practical, and production-safe.")
-
-
-def model_for(persona):
-    return cfg("AISHA_MODEL_THINKING") if persona == "deep" else cfg("AISHA_MODEL_TASK")
+            f"Be concise, practical, and production-safe.\n{AISHA_SELF}")
 
 
 # ============================================================================
@@ -494,6 +616,20 @@ def confirm_and_run(cmd):
 # Suggestion delivery
 # ============================================================================
 
+def apply_review(cmd):
+    """Review cmd when it needs it. Returns (command to deliver, review dict
+    or None). A WARN with a SAFER alternative swaps in the safer command."""
+    if cfg("AISHA_REVIEW") != "1" or not needs_review(cmd):
+        return cmd, None
+    verdict, reason, safer = review_command(cmd)
+    if not verdict:
+        return cmd, None
+    final = safer if verdict == "WARN" and safer else cmd
+    if final != cmd:
+        write_text(spath("last_command.txt"), final + "\n")
+    return final, {"verdict": verdict, "reason": reason, "original": cmd}
+
+
 def deliver_suggestion(response, no_exec=False):
     """-n → bare print; AUTORUN=1 → confirm-and-run; piped stdout or
     non-interactive shell → bare print; else hand to the shim for buffer
@@ -505,7 +641,21 @@ def deliver_suggestion(response, no_exec=False):
         out(response)
         return 0
 
-    if cfg("AISHA_AUTORUN") == "1":
+    autorun = cfg("AISHA_AUTORUN") == "1"
+    bare = not autorun and (not sys.stdout.isatty() or not INTERACTIVE)
+    original = response
+    response, review = apply_review(response)
+    if review:
+        # Keep piped stdout clean: review notes go to stderr in bare mode
+        stream = sys.stderr if bare else sys.stdout
+        if review["verdict"] == "WARN":
+            stream.write(f"\n{RED}🔎 Review: {review['reason']}{RESET}\n")
+            if response != original:
+                stream.write(f"{DIM}  original: {original}{RESET}\n")
+        else:
+            stream.write(f"{DIM}🔎 Reviewed: no issues found{RESET}\n")
+
+    if autorun:
         out("")
         out(f"{CYAN}Suggested command:{RESET}")
         for line in response.splitlines():
@@ -513,7 +663,7 @@ def deliver_suggestion(response, no_exec=False):
         out("")
         return confirm_and_run(response)
 
-    if not sys.stdout.isatty() or not INTERACTIVE:
+    if bare:
         out(response)
         return 0
 
@@ -552,7 +702,7 @@ final line in this form (no code fences, nothing after it):
 FIX: <the corrected command>
 If there is no single corrected command, omit the FIX line entirely."""
 
-    raw = llm_stream_render(cfg("AISHA_MODEL_THINKING"), files, prompt)
+    raw = llm_stream_render("diagnose", files, prompt)
 
     fix = ""
     for line in raw.splitlines():
@@ -618,7 +768,7 @@ def cmd_explain():
         return 1
     files = ctx_files("history.txt", "pwd.txt", "git.txt", "exit.txt")
     files += [path, spath("last_prompt.txt")]
-    llm_stream_render(cfg("AISHA_MODEL_THINKING"), files, f"""You are an expert sysadmin. The user's OS is: {os_info()}
+    llm_stream_render("explain", files, f"""You are an expert sysadmin. The user's OS is: {os_info()}
 Explain why the command in last_command.txt was suggested, what it does, and any risks.
 The original user intent is in last_prompt.txt.""")
     return 0
@@ -635,7 +785,7 @@ def cmd_refine(feedback, extra_files, no_exec):
         return 1
     capture_context(LAST_EXIT)
     thinking_start()
-    raw = llm_capture(cfg("AISHA_MODEL_TASK"),
+    raw = llm_capture("refine",
                       [prompt_file, cmd_file] + extra_files, f"""{system_prompt('sysadmin')}
 
 last_prompt.txt is the user's original request; last_command.txt is the command you previously suggested.
@@ -654,6 +804,250 @@ Output ONLY the revised shell command — no explanation, no code fences.""")
 
 
 # ============================================================================
+# /config
+# ============================================================================
+
+CONFIG_CHOICES = {
+    "AISHA_THINK": ("auto", "on", "off"),
+    "AISHA_REVIEW": ("0", "1"),
+    "AISHA_AUTORUN": ("0", "1"),
+    "AISHA_STDIN_CONTEXT": ("0", "1"),
+}
+
+
+def config_key(name):
+    key = name.upper()
+    if not key.startswith("AISHA_"):
+        key = "AISHA_" + key
+    if key in DEFAULTS or key.startswith("AISHA_COLOR_"):
+        return key
+    return None
+
+
+def write_config_file(path, key, value):
+    """Replace (or drop, when value is None) every KEY= line; append if new."""
+    lines = read_file(path).splitlines(keepends=True)
+    kept = [ln for ln in lines
+            if not ((m := CONFIG_LINE_RE.match(ln)) and m.group(1) == key)]
+    if value is not None:
+        if kept and not kept[-1].endswith("\n"):
+            kept[-1] += "\n"
+        kept.append(f"{key}={shlex.quote(value)}\n")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(kept)
+    os.replace(tmp, path)
+
+
+def cmd_config(args):
+    path = cfg("AISHA_CONFIG_FILE")
+    sub = args[0] if args else "show"
+    usage = "Usage: ai /config [show | path | edit | set KEY VALUE | unset KEY]"
+
+    if sub == "path":
+        out(path)
+        return 0
+
+    if sub == "show":
+        file_vals = parse_config_file(path)
+        out(f"{CYAN}Config file:{RESET} {path}")
+        for key in DEFAULTS:
+            src = ("config" if key in file_vals else
+                   "env" if key in os.environ else "default")
+            out(f"  {key}={shlex.quote(cfg(key))}  {DIM}({src}){RESET}")
+        legacy = [k for k in LEGACY_KEYS if k in CFG]
+        if legacy:
+            out(f"{YELLOW}  Unused legacy keys: {', '.join(legacy)} — "
+                f"remove with: ai /config unset <KEY>{RESET}")
+        return 0
+
+    if sub == "edit":
+        if not os.path.isfile(path):
+            write_config_file(path, "AISHA_MODEL", cfg("AISHA_MODEL"))
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+        return subprocess.call(shlex.split(editor) + [path])
+
+    if sub in ("set", "unset") and len(args) >= 2:
+        key = config_key(args[1])
+        if not key and args[1].upper() in LEGACY_KEYS and sub == "unset":
+            key = args[1].upper()
+        if not key:
+            err(f"Unknown setting: {args[1]}. Known: {', '.join(DEFAULTS)}")
+            return 1
+        if sub == "unset":
+            write_config_file(path, key, None)
+            out(f"{GREEN}✓ Removed {key} from {path}{RESET}")
+            return 0
+        value = " ".join(args[2:])
+        if not value:
+            err(usage)
+            return 1
+        choices = CONFIG_CHOICES.get(key)
+        if choices and value not in choices:
+            err(f"{key} must be one of: {', '.join(choices)}")
+            return 1
+        write_config_file(path, key, value)
+        out(f"{GREEN}✓ Set {key}={shlex.quote(value)} in {path}{RESET}")
+        return 0
+
+    err(usage)
+    return 1
+
+
+# ============================================================================
+# /selftest — known prompts, known outcomes, run against the installed model
+# ============================================================================
+
+SUGGEST_RULES = """The user's request is in the attached last_prompt.txt.
+
+Rules:
+- If the request is a shell/system task, output ONLY the command (no explanation). Most requests are tasks.
+- ONLY if the request is clearly a greeting or chit-chat (like 'hello', 'what's up', 'how are you'), prefix your response with 'ANSWER:' followed by a brief, friendly reply
+- When in doubt, treat it as a task and output a command
+- If stdin.txt is attached, it is data the user piped in — treat it as the subject of the request
+- Multi-line commands are allowed: wrap them in a single fenced code block
+- Never use rm -rf
+- Avoid destructive commands"""
+
+# Each case: files to create, the prompt, and the expected outcome — either
+# the command's stdout ("stdout", or "paths" compared as a set) or a file's
+# content afterwards ("file"). Outcomes are checked, not command text, so any
+# working command passes. "reference" is a portable known-good answer.
+SELFTEST_CASES = [
+    {"name": "sed: change a value in place",
+     "files": {"app.conf": "port=8080\nhost=localhost\n"},
+     "prompt": "In app.conf in the current directory, change the port from 8080 to 9090, editing the file in place.",
+     "file": ("app.conf", "port=9090\nhost=localhost\n"),
+     "reference": "sed 's/^port=8080$/port=9090/' app.conf > app.conf.tmp && mv app.conf.tmp app.conf"},
+    {"name": "sed: value containing slashes",
+     "files": {".env": "DEBUG=1\nDATABASE_URL=sqlite:///tmp/x.db\n"},
+     "prompt": "In the .env file in the current directory, set DATABASE_URL to postgres://db:5432/app, replacing the existing value, editing the file in place.",
+     "file": (".env", "DEBUG=1\nDATABASE_URL=postgres://db:5432/app\n"),
+     "reference": "sed 's|^DATABASE_URL=.*|DATABASE_URL=postgres://db:5432/app|' .env > .env.tmp && mv .env.tmp .env"},
+    {"name": "sed: replace every occurrence in a file",
+     "files": {"hosts.conf": "primary=localhost:5432\nreplica=localhost:5433 # localhost fallback\nname=localhost-db\n"},
+     "prompt": "Replace every occurrence of localhost with 127.0.0.1 in hosts.conf in the current directory, editing the file in place.",
+     "file": ("hosts.conf", "primary=127.0.0.1:5432\nreplica=127.0.0.1:5433 # 127.0.0.1 fallback\nname=127.0.0.1-db\n"),
+     "reference": "sed 's/localhost/127.0.0.1/g' hosts.conf > hosts.conf.tmp && mv hosts.conf.tmp hosts.conf"},
+    {"name": "sed: delete comment lines in place",
+     "files": {"settings.ini": "# main settings\nname=demo\n# debug flag\ndebug=false\n"},
+     "prompt": "Remove all lines starting with # from settings.ini in the current directory, editing the file in place.",
+     "file": ("settings.ini", "name=demo\ndebug=false\n"),
+     "reference": "grep -v '^#' settings.ini > settings.ini.tmp && mv settings.ini.tmp settings.ini"},
+    {"name": "append a line to a dotfile",
+     "files": {".zshrc": "alias ll='ls -la'\n"},
+     "prompt": "Append the line export EDITOR=vim to the .zshrc file in the current directory.",
+     "file": (".zshrc", "alias ll='ls -la'\nexport EDITOR=vim\n"),
+     "reference": "echo 'export EDITOR=vim' >> .zshrc"},
+    {"name": "grep: non-comment, non-empty lines",
+     "files": {"settings.ini": "# main settings\nname=demo\n\n# debug flag\ndebug=false\n"},
+     "prompt": "Print the lines of settings.ini in the current directory that are neither empty nor comments (starting with #).",
+     "stdout": "name=demo\ndebug=false",
+     "reference": "grep -v -e '^#' -e '^$' settings.ini"},
+    {"name": "grep: count matching lines",
+     "files": {"access.log": "GET /a 200\nGET /b 404\nGET /c 200\nPOST /d 404\nGET /e 500\n"},
+     "prompt": "Count how many lines in access.log in the current directory contain the status code 404. Print only the number.",
+     "stdout": "2",
+     "reference": "grep -c ' 404' access.log"},
+    {"name": "grep: files containing a word",
+     "files": {"conf/a.conf": "level=debug\n", "conf/b.conf": "level=info\n",
+               "conf/sub/c.conf": "debug=true\n"},
+     "prompt": "List the paths of files under the conf directory (recursively) that contain the word debug. Print only the paths.",
+     "paths": {"conf/a.conf", "conf/sub/c.conf"},
+     "reference": "grep -rl debug conf"},
+    {"name": "awk: column without header",
+     "files": {"users.csv": "name,age\nalice,30\nbob,25\n"},
+     "prompt": "Print only the values of the first column of users.csv in the current directory, skipping the header line.",
+     "stdout": "alice\nbob",
+     "reference": "awk -F, 'NR>1 {print $1}' users.csv"},
+    {"name": "awk: sum a column",
+     "files": {"users.csv": "name,age\nalice,30\nbob,25\n"},
+     "prompt": "Print the sum of the second column of users.csv in the current directory, skipping the header line. Print only the number.",
+     "stdout": "55",
+     "reference": "awk -F, 'NR>1 {s+=$2} END {print s}' users.csv"},
+    {"name": "extract a config value",
+     "files": {"app.conf": "port=8080\nhost=localhost\n"},
+     "prompt": "Print just the value of the host key in app.conf in the current directory (only the value, nothing else).",
+     "stdout": "localhost",
+     "reference": "awk -F= '$1==\"host\" {print $2}' app.conf"},
+]
+
+
+def _selftest_case(case, reference):
+    import shutil
+    import tempfile
+    work = tempfile.mkdtemp(prefix="aisha-selftest-")
+    try:
+        for name, content in case["files"].items():
+            write_text(os.path.join(work, name), content)
+        if reference:
+            cmd = case["reference"]
+        else:
+            prompt_file = os.path.join(tempfile.mkdtemp(prefix="aisha-prompt-"), "last_prompt.txt")
+            write_text(prompt_file, case["prompt"] + "\n")
+            cmd = strip_response(llm_capture(
+                "suggest", [prompt_file], f"{system_prompt('sysadmin')}\n\n{SUGGEST_RULES}"))
+            shutil.rmtree(os.path.dirname(prompt_file), ignore_errors=True)
+        if not cmd or cmd.startswith("ANSWER:"):
+            return False, cmd, "no command returned"
+        if is_risky(cmd):
+            return False, cmd, "flagged risky — not run"
+        # HOME points into the scratch dir so ~/... paths can't touch real files
+        try:
+            r = subprocess.run(["bash", "-c", cmd], cwd=work, capture_output=True, text=True,
+                               timeout=20, env=dict(os.environ, HOME=work))
+        except subprocess.TimeoutExpired:
+            return False, cmd, "timed out"
+        got = r.stdout.strip()
+        if "file" in case:
+            name, want = case["file"]
+            have = read_file(os.path.join(work, name))
+            if have.rstrip("\n") != want.rstrip("\n"):
+                return False, cmd, f"{name} is now:\n{have.rstrip() or '(empty)'}"
+            return True, cmd, ""
+        if "paths" in case:
+            have = {(ln.strip()[2:] if ln.strip().startswith("./") else ln.strip())
+                    for ln in got.splitlines() if ln.strip()}
+            ok = have == case["paths"]
+            return ok, cmd, "" if ok else f"got: {sorted(have)}"
+        have = "\n".join(ln.strip() for ln in got.splitlines() if ln.strip())
+        ok = have == case["stdout"]
+        return ok, cmd, "" if ok else f"got: {have or '(no output)'}" + (
+            f" | stderr: {r.stderr.strip()[:200]}" if r.stderr.strip() else "")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def cmd_selftest(args):
+    reference = "--reference" in args
+    names = [a for a in args if not a.startswith("--")]
+    if names:
+        CFG["AISHA_MODEL"] = names[0]
+    label = "reference answers" if reference else f"{cfg('AISHA_MODEL')} (thinking {cfg('AISHA_THINK')})"
+    out(f"{CYAN}aisha selftest — {label}{RESET}")
+    out(f"{DIM}Commands run in a throwaway directory with HOME pointed at it.{RESET}")
+    out("")
+    passed, start = 0, time.time()
+    for case in SELFTEST_CASES:
+        t = time.time()
+        ok, cmd, detail = _selftest_case(case, reference)
+        passed += ok
+        mark = f"{GREEN}✓{RESET}" if ok else f"{RED}✗{RESET}"
+        out(f"{mark} {case['name']} {DIM}({time.time() - t:.1f}s){RESET}")
+        if not ok:
+            for line in (cmd or "(none)").splitlines():
+                out(f"    {YELLOW}{line}{RESET}")
+            for line in detail.splitlines():
+                out(f"    {DIM}{line}{RESET}")
+    total = len(SELFTEST_CASES)
+    color = GREEN if passed == total else YELLOW if passed >= total * 0.8 else RED
+    out("")
+    out(f"{color}{passed}/{total} passed{RESET} {DIM}in {time.time() - start:.1f}s{RESET}")
+    return 0 if passed == total else 1
+
+
+# ============================================================================
 # Help & tips
 # ============================================================================
 
@@ -665,19 +1059,22 @@ def cmd_help():
 ### Subcommands
 - `ai redo` — re-run the last suggested command
 - `ai rerun` — re-run your last command, capture its output, diagnose failures
-- `ai explain` — explain the last suggested command (thinking model)
+- `ai explain` — explain the last suggested command
+- `ai /config [show|set KEY VALUE|unset KEY|edit|path]` — view or change settings
+- `ai /selftest [model]` — score a model on sed/awk/grep config tasks with known answers
 - `ai /help` — this help
 - `ai /tips [topic]` — power-user one-liners (curated, or generated for a topic)
 
 ### Flags
-- `--deep` — use the thinking model for thorough analysis
+- `--deep` — thorough analysis (deep persona, thinking on)
 - `-n, --no-exec` — print the suggested command only (for scripts and pipes)
 - `--json` — machine-readable output: {{"type","command","risky","model"}}
 - `-c, --refine <feedback>` — revise the last suggestion ("use ripgrep instead")
 - `--agent <goal>` — autonomous multi-step mode (`--agent --resume` to continue)
 - `--agent-safe <goal>` — agent mode, confirm every step
 - `--version` — print version
-- `--install` / `--uninstall` — install, upgrade, or remove aisha
+- `--install` / `--uninstall` — install or remove aisha
+- `--upgrade` — fetch and install the latest aisha; offers to update the plugin and model
 
 ### Piping
 - `docker logs app 2>&1 | ai why is this crashing` — piped input becomes context
@@ -687,12 +1084,17 @@ def cmd_help():
 By default the suggested command is placed in your input line (zsh) or
 history (bash: press ↑) so you can edit it before running. Set
 `AISHA_AUTORUN=1` for the legacy confirm-and-run prompt. Risky commands
-(rm, sudo, dd, ...) always get a red warning.
+(rm, sudo, dd, ...) always get a red warning. Risky and config/system-file
+editing commands (sed -i, redirects into dotfiles or /etc, chmod, ...) are
+reviewed by a second thinking pass first; if it finds a problem and a safer
+command, the safer one is what you get (`AISHA_REVIEW=0` disables).
 
 ### Configuration
-Config file: `{cfg('AISHA_CONFIG_FILE')}` (KEY=value lines).
-Key knobs: `AISHA_MODEL_TASK`, `AISHA_MODEL_THINKING`, `AISHA_AGENT_MAX_STEPS`,
-`AISHA_AUTORUN`, `AISHA_STDIN_CONTEXT`, `AISHA_RISKY_EXTRA`, `AISHA_RISKY_ALLOW`.
+Config file: `{cfg('AISHA_CONFIG_FILE')}` — change it with `ai /config set`.
+One model (`AISHA_MODEL`) serves every mode; modes differ in prompt and
+thinking (`AISHA_THINK=auto|on|off`). Other knobs: `AISHA_REVIEW`,
+`AISHA_AGENT_MAX_STEPS`, `AISHA_AUTORUN`, `AISHA_STDIN_CONTEXT`,
+`AISHA_RISKY_EXTRA`, `AISHA_RISKY_ALLOW`.
 
 Bare `ai` right after a failed command diagnoses the failure.""")
     return 0
@@ -706,7 +1108,7 @@ CURATED_TIPS = """# aisha tips & tricks
 - `docker logs app 2>&1 | ai why is this crashing` — piped input becomes context
 - `ai -c use ripgrep instead` — refine the last suggestion
 - `ai -n list open ports | pbcopy` — print-only, pipe the command anywhere
-- `ai --deep ...` — thinking model for gnarly questions
+- `ai --deep ...` — deep persona with thinking for gnarly questions
 - `ai explain` — what the last suggestion does and its risks
 - `ai /tips awk` — five generated one-liners on any topic
 
@@ -726,7 +1128,7 @@ CURATED_TIPS = """# aisha tips & tricks
 def cmd_tips(topic_args):
     if topic_args:
         topic = " ".join(topic_args)
-        llm_stream_render(cfg("AISHA_MODEL_TASK"), [], f"""You are an expert Unix/Linux sysadmin. The user's OS is: {os_info()}
+        llm_stream_render("tips", [], f"""You are an expert Unix/Linux sysadmin. The user's OS is: {os_info()}
 Give exactly 5 practical, non-obvious shell one-liners about: {topic}
 Format each as a markdown bullet: the command in backticks, then a dash and a one-sentence explanation.
 No preamble, no closing remarks.""")
@@ -977,7 +1379,7 @@ Rules:
                 write_text(os.path.join(self.dir, "history_context.txt"),
                            self.history_context())
                 thinking_start()
-                raw = llm_capture(cfg("AISHA_MODEL_TASK"), [
+                raw = llm_capture("agent", [
                     os.path.join(CTX, "pwd.txt"),
                     os.path.join(CTX, "git.txt"),
                     os.path.join(self.dir, "goal.txt"),
@@ -1251,9 +1653,9 @@ def check_dependencies():
 
     if _which("ollama"):
         out("")
-        out(f"{DIM}Pull models for your hardware (see README for the full guide):{RESET}")
-        out(f"{DIM}  48 GB Mac:  ollama pull qwen3.6:35b-mlx && ollama pull gemma4:31b-mlx{RESET}")
-        out(f"{DIM}  16 GB Mac:  ollama pull gemma4:e4b-mlx && ollama pull qwen3.5:9b-mlx{RESET}")
+        out(f"{DIM}Pull the default model (one model serves every mode):{RESET}")
+        out(f"{DIM}  ollama pull {DEFAULTS['AISHA_MODEL']}{RESET}")
+        out(f"{DIM}  Another model: ai /config set AISHA_MODEL <name>  (see README){RESET}")
 
 
 def cmd_install(shim_path):
@@ -1294,6 +1696,51 @@ def cmd_install(shim_path):
     out("")
     out(f"{CYAN}Installation complete!{RESET}")
     out(f"Run: {YELLOW}source {rc_file}{RESET} (or open a new terminal window)")
+    return 0
+
+
+def _version_tuple(v):
+    return tuple(int(x) for x in re.findall(r'\d+', v or "0"))
+
+
+REPO_RAW = "https://raw.githubusercontent.com/buratinodev/aisha/main"
+
+
+def cmd_upgrade():
+    """Fetch the latest shim + core and install them with the new installer,
+    then offer to refresh the llm-ollama plugin and the configured model."""
+    import tempfile
+    import urllib.request
+    repo = os.environ.get("AISHA_REPO_RAW", REPO_RAW)
+    installed = _installed_version(os.path.expanduser("~/.aisha-core.py")) or VERSION
+    out(f"{CYAN}Checking {repo} for updates...{RESET}")
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            for name in ("aisha.sh", "aisha_core.py"):
+                urllib.request.urlretrieve(f"{repo}/{name}", os.path.join(tmp, name))
+        except OSError as e:
+            err(f"Download failed: {e}")
+            return 1
+        latest = _installed_version(os.path.join(tmp, "aisha_core.py"))
+        if not latest:
+            err("Downloaded core has no VERSION — refusing to install it.")
+            return 1
+        if _version_tuple(latest) < _version_tuple(installed):
+            print(f"{YELLOW}Installed {installed} is newer than {latest} — not downgrading.{RESET}")
+        elif latest == installed:
+            out(f"{GREEN}✓ aisha {installed} is up to date{RESET}")
+        else:
+            out(f"Upgrading aisha {installed} → {latest}")
+            rc = subprocess.call([sys.executable, os.path.join(tmp, "aisha_core.py"),
+                                  "--install", "--shim", os.path.join(tmp, "aisha.sh")])
+            if rc != 0:
+                return rc
+
+    if _which("llm") and _ask("Also upgrade the llm-ollama plugin?"):
+        _run_visible(["llm", "install", "-U", "llm-ollama"])
+    model = cfg("AISHA_MODEL")
+    if _which("ollama") and _ask(f"Also update the model {model} (ollama pull)?"):
+        _run_visible(["ollama", "pull", model])
     return 0
 
 
@@ -1380,7 +1827,14 @@ def main(argv):
         return cmd_install(shim)
     if argv[:1] == ["--uninstall"]:
         return cmd_uninstall()
+    if argv[:1] in (["--upgrade"], ["/upgrade"]):
+        return cmd_upgrade()
+    if argv[:1] == ["/config"]:
+        return cmd_config(argv[1:])
+    if argv[:1] == ["/selftest"]:
+        return cmd_selftest(argv[1:])
 
+    warn_legacy()
     ensure_dirs()
 
     # ---- flags (order-independent, may precede the prompt) ----
@@ -1456,7 +1910,7 @@ def main(argv):
 
     # ---- piped input with no prompt → diagnose the piped data ----
     if not prompt and stdin_ctx:
-        llm_stream_render(cfg("AISHA_MODEL_THINKING"),
+        llm_stream_render("diagnose",
                           [stdin_ctx] + ctx_files("pwd.txt", "git.txt"),
                           f"""{system_prompt('deep')}
 
@@ -1478,13 +1932,15 @@ Summarize what it shows and diagnose any errors or anomalies.""")
             return 0
         write_text(spath("last_prompt.txt"), prompt + "\n")
 
-    # Auto-select deep persona for explanation queries
+    # Explanation queries get the deep persona; --deep also turns on thinking
+    deep = persona == "deep"
     if EXPLAIN_QUERY_RE.match(prompt):
         persona = "deep"
-    model = model_for(persona)
+    model = cfg("AISHA_MODEL")
 
     # ---- explanation mode (how/why/what/explain/help) ----
     if EXPLAIN_QUERY_RE.match(prompt):
+        mode = "deep" if deep else "explain"
         explain_prompt = f"""{system_prompt(persona)}
 
 Explain clearly and include one concrete command example to illustrate if applicable, but do NOT prompt the user to execute anything.
@@ -1492,30 +1948,19 @@ The user's question is in the attached last_prompt.txt. If stdin.txt is attached
         explain_files = (ctx_files("history.txt", "pwd.txt", "git.txt")
                          + [spath("last_prompt.txt")] + extra_files)
         if json_mode:
-            raw = llm_capture(model, explain_files, explain_prompt)
+            raw = llm_capture(mode, explain_files, explain_prompt)
             answer = re.sub(r'<think>.*?</think>', '', raw, flags=re.S).strip()
             print(json.dumps({"type": "answer", "answer": answer, "model": model}))
             return 0
-        llm_stream_render(model, explain_files, explain_prompt)
+        llm_stream_render(mode, explain_files, explain_prompt)
         return 0
 
     # ---- command suggestion mode ----
     thinking_start()
-    raw = llm_capture(model,
+    raw = llm_capture("deep" if deep else "suggest",
                       ctx_files("history.txt", "pwd.txt", "git.txt")
                       + [spath("last_prompt.txt")] + extra_files,
-                      f"""{system_prompt(persona)}
-
-The user's request is in the attached last_prompt.txt.
-
-Rules:
-- If the request is a shell/system task, output ONLY the command (no explanation). Most requests are tasks.
-- ONLY if the request is clearly a greeting or chit-chat (like 'hello', 'what's up', 'how are you'), prefix your response with 'ANSWER:' followed by a brief, friendly reply
-- When in doubt, treat it as a task and output a command
-- If stdin.txt is attached, it is data the user piped in — treat it as the subject of the request
-- Multi-line commands are allowed: wrap them in a single fenced code block
-- Never use rm -rf
-- Avoid destructive commands""")
+                      f"{system_prompt(persona)}\n\n{SUGGEST_RULES}")
     thinking_end()
 
     response = strip_response(raw)
@@ -1529,8 +1974,12 @@ Rules:
                               "model": model}))
             return 0
         write_text(spath("last_command.txt"), response + "\n")
-        print(json.dumps({"type": "command", "command": response,
-                          "risky": is_risky(response), "model": model}))
+        response, review = apply_review(response)
+        result = {"type": "command", "command": response,
+                  "risky": is_risky(response), "model": model}
+        if review:
+            result["review"] = review
+        print(json.dumps(result))
         return 0
 
     if not response:

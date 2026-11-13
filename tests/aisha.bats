@@ -12,8 +12,7 @@ setup() {
   export AISHA_CORE_PY="$BATS_TEST_DIRNAME/../aisha_core.py"
   export PATH="$BATS_TEST_DIRNAME/stubs:$PATH"
   export AISHA_TEST_LLM_LOG="$TEST_TMP/llm.log"
-  export AISHA_MODEL_TASK="task-model"
-  export AISHA_MODEL_THINKING="think-model"
+  export AISHA_MODEL="test-model"
   # Without this, prompts after consumed stdin block on the developer's terminal.
   export AISHA_TTY=/dev/null
 
@@ -106,12 +105,12 @@ teardown() {
 
 # ---- auto-fix trigger (last exit code capture) -------------------------------
 
-@test "bare ai after a failing command triggers auto-fix with the thinking model" {
+@test "bare ai after a failing command triggers auto-fix with thinking on" {
   export AISHA_TEST_LLM_RESPONSE="diagnosis: command not found"
   run bash -c 'source "$AISHA_SH"; false; ai'
   [ "$status" -eq 0 ]
   [[ "$output" == *"diagnosis: command not found"* ]]
-  grep -q "think-model" "$AISHA_TEST_LLM_LOG"
+  grep -q -- "-m test-model -o think true" "$AISHA_TEST_LLM_LOG"
 }
 
 @test "bare ai after a successful command falls back to the Ask prompt" {
@@ -186,7 +185,7 @@ teardown() {
 
 # ---- suggestion flow (legacy confirm-and-run via AISHA_AUTORUN=1) ------------
 
-@test "autorun suggestion flow: shows command, uses task model, aborts on n" {
+@test "autorun suggestion flow: shows command, thinks, aborts on n" {
   export AISHA_TEST_LLM_RESPONSE="ls -la"
   export AISHA_AUTORUN=1 AISHA_STDIN_CONTEXT=0
   run bash -c 'source "$AISHA_SH"; printf "n\n" | ai list all files'
@@ -194,7 +193,7 @@ teardown() {
   [[ "$output" == *"Suggested command"* ]]
   [[ "$output" == *"ls -la"* ]]
   [[ "$output" == *"Aborted"* ]]
-  grep -q "task-model" "$AISHA_TEST_LLM_LOG"
+  grep -q -- "-m test-model -o think true" "$AISHA_TEST_LLM_LOG"
 }
 
 @test "autorun risky suggestion requires YES and aborts otherwise" {
@@ -239,13 +238,13 @@ teardown() {
   grep -q "stdin.txt" "$AISHA_TEST_LLM_LOG"
 }
 
-@test "piped stdin with no prompt is diagnosed with the thinking model" {
+@test "piped stdin with no prompt is diagnosed with thinking on" {
   export AISHA_TEST_LLM_RESPONSE="this log shows a crash"
   run bash -c 'source "$AISHA_SH"; printf "segfault at 0x0" | ai'
   [ "$status" -eq 0 ]
   [[ "$output" == *"this log shows a crash"* ]]
   grep -q "stdin.txt" "$AISHA_TEST_LLM_LOG"
-  grep -q "think-model" "$AISHA_TEST_LLM_LOG"
+  grep -q -- "-o think true" "$AISHA_TEST_LLM_LOG"
 }
 
 @test "ai -c refines the previous suggestion" {
@@ -288,13 +287,13 @@ teardown() {
   [ ! -s "$AISHA_TEST_LLM_LOG" ]
 }
 
-@test "ai /tips <topic> asks the task model for one-liners" {
+@test "ai /tips <topic> asks the model for one-liners without thinking" {
   export AISHA_TEST_LLM_RESPONSE="- \`docker system prune\` - free space"
   run bash -c 'source "$AISHA_SH"; ai /tips docker < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" == *"docker system prune"* ]]
   grep -q "docker" "$AISHA_TEST_LLM_LOG"
-  grep -q "task-model" "$AISHA_TEST_LLM_LOG"
+  grep -q -- "-m test-model -o think false" "$AISHA_TEST_LLM_LOG"
 }
 
 @test "flags compose in any order (--deep -n)" {
@@ -302,7 +301,143 @@ teardown() {
   run bash -c 'source "$AISHA_SH"; ai -n --deep check what uses port 443 < /dev/null'
   [ "$status" -eq 0 ]
   [ "$output" = "lsof -i :443" ]
-  grep -q "think-model" "$AISHA_TEST_LLM_LOG"
+  grep -q -- "-o think true" "$AISHA_TEST_LLM_LOG"
+}
+
+# ---- thinking control ----------------------------------------------------------
+
+@test "AISHA_THINK=off disables thinking for every mode" {
+  export AISHA_TEST_LLM_RESPONSE="df -h" AISHA_THINK=off
+  run bash -c 'source "$AISHA_SH"; ai -n show disk usage < /dev/null'
+  [ "$output" = "df -h" ]
+  grep -q -- "-o think false" "$AISHA_TEST_LLM_LOG"
+  ! grep -q -- "-o think true" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "models that reject the think option are retried without it" {
+  export AISHA_TEST_LLM_RESPONSE="df -h" AISHA_TEST_LLM_NO_THINK=1
+  run bash -c 'source "$AISHA_SH"; ai -n show disk usage < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$output" = "df -h" ]
+  [ "$(grep -c ARGS "$AISHA_TEST_LLM_LOG")" -eq 2 ]
+}
+
+@test "legacy AISHA_MODEL_TASK triggers a migration warning" {
+  export AISHA_TEST_LLM_RESPONSE="df -h" AISHA_MODEL_TASK=old-model
+  run bash -c 'source "$AISHA_SH"; ai -n show disk usage < /dev/null'
+  [[ "$output" == *"no longer used"* ]]
+  ! grep -q "old-model" "$AISHA_TEST_LLM_LOG"
+}
+
+# ---- review of sensitive commands -----------------------------------------------
+
+@test "config-editing commands are reviewed and a safer command replaces a WARN" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue"
+  printf '%s\n===\n%s\n' \
+    "sed -i '' 's/a/b/' ~/.zshrc" \
+    "$(printf 'WARN: edits ~/.zshrc without a backup\nSAFER: sed -i.bak s/a/b/ ~/.zshrc')" \
+    > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --json change a to b in my zshrc < /dev/null'
+  [ "$status" -eq 0 ]
+  python3 - <<PY
+import json
+d = json.loads('''$output''')
+assert d["command"] == "sed -i.bak s/a/b/ ~/.zshrc", d
+assert d["review"]["verdict"] == "WARN" and "backup" in d["review"]["reason"], d
+PY
+}
+
+@test "safe commands skip review (one model call)" {
+  export AISHA_TEST_LLM_RESPONSE="ls -la"
+  run bash -c 'source "$AISHA_SH"; ai --json list files < /dev/null'
+  [ "$(grep -c ARGS "$AISHA_TEST_LLM_LOG")" -eq 1 ]
+}
+
+@test "AISHA_REVIEW=0 disables review" {
+  export AISHA_TEST_LLM_RESPONSE="chmod 600 ~/.ssh/config" AISHA_REVIEW=0
+  run bash -c 'source "$AISHA_SH"; ai --json lock down ssh config < /dev/null'
+  [ "$(grep -c ARGS "$AISHA_TEST_LLM_LOG")" -eq 1 ]
+}
+
+# ---- /config ---------------------------------------------------------------------
+
+@test "ai /config set writes the config file and the core reads it" {
+  run bash -c 'source "$AISHA_SH"; ai /config set model qwen3.5:9b-mlx < /dev/null'
+  [ "$status" -eq 0 ]
+  grep -q "^AISHA_MODEL=qwen3.5:9b-mlx$" "$HOME/.config/aisha/config"
+  run bash -c 'source "$AISHA_SH"; ai /config show < /dev/null'
+  [[ "$output" == *"AISHA_MODEL=qwen3.5:9b-mlx"*"(config)"* ]]
+}
+
+@test "ai /config set replaces existing lines and keeps others" {
+  mkdir -p "$HOME/.config/aisha"
+  printf '# mine\nAISHA_MODEL=a\nAISHA_AUTORUN=1\n' > "$HOME/.config/aisha/config"
+  run bash -c 'source "$AISHA_SH"; ai /config set AISHA_MODEL b < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^AISHA_MODEL=' "$HOME/.config/aisha/config")" -eq 1 ]
+  grep -q "^AISHA_MODEL=b$" "$HOME/.config/aisha/config"
+  grep -q "^# mine$" "$HOME/.config/aisha/config"
+  grep -q "^AISHA_AUTORUN=1$" "$HOME/.config/aisha/config"
+}
+
+@test "ai /config rejects unknown keys and invalid values" {
+  run bash -c 'source "$AISHA_SH"; ai /config set bogus 1 < /dev/null'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Unknown setting"* ]]
+  run bash -c 'source "$AISHA_SH"; ai /config set think maybe < /dev/null'
+  [ "$status" -eq 1 ]
+  [ ! -f "$HOME/.config/aisha/config" ]
+}
+
+@test "suggestion prompts tell the model to use ai /config" {
+  export AISHA_TEST_LLM_RESPONSE="ai /config set AISHA_MODEL x"
+  run bash -c 'source "$AISHA_SH"; ai -n set x as my model < /dev/null'
+  grep -q "ai /config set KEY VALUE" "$AISHA_TEST_LLM_LOG"
+}
+
+# ---- /selftest -------------------------------------------------------------------
+
+@test "ai /selftest --reference: every case's reference answer passes" {
+  run bash -c 'source "$AISHA_SH"; ai /selftest --reference < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"11/11 passed"* ]]
+  [ ! -s "$AISHA_TEST_LLM_LOG" ]
+}
+
+@test "ai /selftest scores model answers and shows failures" {
+  export AISHA_TEST_LLM_RESPONSE="echo wrong"
+  run bash -c 'source "$AISHA_SH"; ai /selftest some-model < /dev/null'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"some-model"* ]]
+  [[ "$output" == *"0/11 passed"* ]]
+  [[ "$output" == *"echo wrong"* ]]
+  grep -q -- "-m some-model -o think true" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "ai --upgrade installs a newer release and skips an equal one" {
+  export SHELL=/bin/bash
+  touch "$HOME/.bashrc"
+  repo="$TEST_TMP/repo"
+  mkdir -p "$repo"
+  cp "$AISHA_SH" "$repo/aisha.sh"
+  sed 's/^VERSION = .*/VERSION = "9.9.9"/' "$AISHA_CORE_PY" > "$repo/aisha_core.py"
+  export AISHA_REPO_RAW="file://$repo"
+
+  run bash -c 'source "$AISHA_SH"; ai --upgrade < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Upgrading aisha"*"9.9.9"* ]]
+  grep -q '^VERSION = "9.9.9"' "$HOME/.aisha-core.py"
+
+  run bash -c 'source "$AISHA_SH"; ai --upgrade < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"9.9.9 is up to date"* ]]
+}
+
+@test "ai /selftest never runs risky commands" {
+  export AISHA_TEST_LLM_RESPONSE="rm -r conf"
+  run bash -c 'source "$AISHA_SH"; ai /selftest < /dev/null'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"flagged risky"* ]]
 }
 
 # ---- ANSWER: path ------------------------------------------------------------

@@ -1,6 +1,6 @@
 # aisha — Improvement Investigation & Implementation Plan
 
-Status: **all phases complete (2026-11-13)** · Scope: `aisha.sh`, `aisha_core.py`, README
+Status: **Phases 1–6 complete (2026-11-13)** · Scope: `aisha.sh`, `aisha_core.py`, README
 
 This document captures a code-level audit of aisha and a phased plan to fix the
 weaknesses and close the gap to what a power user expects from a shell AI
@@ -239,7 +239,8 @@ history, enforced tool gating, cwd-tracking + restore on resume, stdlib
 web_fetch with byte cap; markdown renderer is one pass in Python. Model
 defaults re-tiered for Apple Silicon (48 GB: qwen3.6:35b-mlx task /
 gemma4:31b-mlx thinking; 16 GB: gemma4:e4b-mlx task / qwen3.5:9b-mlx
-thinking — see README). Test suite: 34.
+thinking — see README). Test suite: 34. *(The two-model tiers were replaced
+by a single model in Phase 6.)*
 
 Original rationale and the single-file-install discussion follow.
 
@@ -312,9 +313,128 @@ the repo — adds a network dependency. Decide once the core stabilizes;
    embedding) rejected: escaping maintenance outweighs the benefit now that
    `install.sh` gives the same one-command experience.
 
+### Phase 6 — Model strategy, review, self-test ✅ DONE (2026-11-13)
+
+Triggered by a real failure: asked to "set qwen3.5:9b-mlx as default in the
+.aisha config", the model hand-edited `~/.aisha` — the program itself (the
+installed copy was still the pre-Phase-1 monolith) — and broke the shell
+integration. The model had no idea where aisha's settings live.
+
+Shipped (v0.6.0):
+
+1. **One model, modes in the prompt.** `AISHA_MODEL` (default
+   `gemma4:e4b-mlx`) replaces `AISHA_MODEL_TASK`/`AISHA_MODEL_THINKING`; the
+   old keys are ignored with a migration warning. Modes differ only in
+   system prompt and thinking (`MODES` table in the core).
+2. **Per-mode thinking** via Ollama's `think` request option
+   (`llm -o think true|false`, llm-ollama ≥ 0.15). On wherever a command may
+   be executed (suggest, refine, review, diagnose/auto-fix, `--deep`, agent
+   steps); off for streamed prose (explain questions, `/tips`).
+   `AISHA_THINK=auto|on|off`. Models/plugins that reject the option are
+   detected from the error and retried without it (cached per process).
+3. **Review pass** for sensitive commands: anything `is_risky` or matching
+   `SENSITIVE_PATTERNS` (`sed -i`, `perl -i`, redirects into `~`/dotfiles/
+   `/etc`, `tee`, `chmod`/`chown`, `defaults write`, `launchctl`, `crontab`,
+   ...) gets a second thinking call that returns `OK` or `WARN: reason` +
+   optional `SAFER: cmd`. A WARN with a safer command swaps it in (original
+   shown); `--json` carries a `review` object; notes go to stderr when
+   stdout is piped. `AISHA_REVIEW=0` disables. `-n` skips review (scripts).
+4. **`ai /config`** — show (with source: config/env/default), `set`,
+   `unset`, `edit`, `path`. Keys validated (`AISHA_` prefix optional),
+   enumerated values checked, atomic rewrite preserving other lines. Every
+   system prompt now includes `AISHA_SELF`: settings change only via
+   `ai /config set`, never edit `~/.aisha`/`~/.aisha-core.py`.
+5. **`ai /selftest [model]`** — 11 fixed sed/awk/grep tasks on config-style
+   files. Each case writes sample files to a scratch dir (HOME pointed
+   there), sends the exact production suggestion prompt (`SUGGEST_RULES`),
+   runs the answer, and checks the *outcome* (file content, stdout, or a
+   path set) — not the command text. Risky answers are never run. Every
+   case has a portable `reference` answer; `--reference` runs those
+   instead of the model, which validates the cases themselves in CI.
+6. **`ai --upgrade`** — downloads the latest shim + core
+   (`AISHA_REPO_RAW` overridable), installs via the *downloaded* installer,
+   never downgrades, then offers to `llm install -U llm-ollama` and
+   `ollama pull $AISHA_MODEL`.
+
+Also: `ai /selftest`, `/config`, `--upgrade` in help and completion;
+installer prints a single `ollama pull`; tests isolate prompts from the
+developer's terminal via `AISHA_TTY`. Test suite: 57.
+
 ---
 
 ## Decisions log
+
+**One model with per-mode thinking instead of task/thinking models
+(2026-11-13).** Two models cost RAM and, on 16 GB machines, a model swap on
+every mode change. Modern small models (Gemma 4, Qwen 3.5) are hybrid
+reasoners: the same weights answer fast with thinking off or carefully with
+it on, so the "thinking model" role collapses into a request option.
+
+**No fast model by default; no dense "deep" model (2026-11-13).** Measured
+on an M-series Mac, same prompts, think off/on:
+
+| Prompt | qwen3.5:4b-mlx off / on | gemma4:e4b-mlx off / on |
+|---|---|---|
+| 5 largest files | GNU-only flags (broken on macOS) / malformed `-exec` | ok / ok |
+| port 8080 | ok / ok | ok / ok |
+| delete .log > 7 days | ok / ok | **`find / … -delete`** / ok |
+| count Python LOC | counts files, not lines / broken | approx. / ok |
+| latency | 0.9–3.7 s / 2.5–6.3 s | 0.8–1.1 s / 1.1–5.3 s |
+
+qwen3.5:4b was no faster and less correct, so a separate fast model buys
+nothing; `AISHA_MODEL_FAST` was dropped before shipping. With both models
+loaded `ollama ps` showed 5.0 + 9.6 GB resident. A dense deep model was
+rejected for a shell assistant: thinking on the main model covers `--deep`,
+and a 19 GB load for occasional use isn't worth the RAM; users who want one
+can point `AISHA_MODEL` at it. The `find / -delete` row is why thinking is
+on for command suggestions by default.
+
+**Thinking control: Ollama `think` option, not prompt tags (2026-11-13).**
+`/think` / `/no_think` are Qwen3 soft switches and not part of Gemma 4's
+protocol (Gemma uses a `<|think|>` system-prompt token, which Ollama's chat
+template manages) — a prompt tag is model-specific and silently ignored
+elsewhere. The `think` request option is model-agnostic and exposed by
+llm-ollama 0.15.1 as `-o think`. Reasoning text comes back in a separate
+field, so it never reaches aisha's output (the `<think>` stripping stays as a
+fallback for other backends). Sending `think` to a model without the
+capability fails with HTTP 400 ("does not support thinking") — hence the
+retry-without-option fallback.
+
+**Review pass instead of more blacklist (2026-11-13).** Config and system
+file edits are rarely "destructive" by pattern, but a wrong path, missing
+`/g`, overwrite-vs-append, or GNU `sed -i` on macOS silently breaks things.
+A second thinking pass that knows the user's intent catches these. Trigger
+is pattern-based (cheap; safe commands cost one call), the reviewer is the
+same model (no extra RAM). Known limitation from testing: the reviewer can
+be over-cautious — for "delete .log files older than 7 days" it swapped
+`-delete` for `-print` (safer, but not what was asked); the original is
+always shown so the user can take it back.
+
+**Built-in `ai /config` instead of letting the model edit files
+(2026-11-13).** A deterministic, validated writer beats any prompt rule. The
+prompt rule (`AISHA_SELF`) only has to point the model at the command —
+verified with the real model: "set qwen3.5:9b-mlx as default in the .aisha
+config" now yields `ai /config set AISHA_MODEL qwen3.5:9b-mlx`.
+
+**Self-test checks outcomes, not command text (2026-11-13).** Many correct
+commands exist per task; comparing strings would fail good answers and
+miss broken ones. Running in a scratch dir with `HOME` redirected and risky
+answers skipped keeps it safe enough for a user-facing command. First
+results (10 cases at the time; the replace-all case was added after):
+
+| Model | Score | Time | Failures |
+|---|---|---|---|
+| gemma4:e4b-mlx | 8/10 | 39 s | `/` delimiter with a URL value (sed parse error); took "host key" literally |
+| qwen3.5:4b-mlx | 8/10 | 673 s | same URL-delimiter failure; over-specified grep for the host value |
+
+Both models failing the slash-delimiter case is exactly the kind of bug that
+broke the user's config by hand — worth keeping as a regression signal when
+trying new models or prompt changes.
+
+**`ai --upgrade` installs with the downloaded installer (2026-11-13).** The
+new release may change install logic (files, rc block), so the old core must
+not install the new one. Version comparison prevents accidental downgrades
+when running from an unreleased clone.
 
 **Apple on-device Foundation Model (`fm` CLI) — considered, rejected
 (2026-11-13).** macOS ships an `fm` command (Apple Silicon, ~3B params) that
@@ -334,9 +454,13 @@ one defensible use (summarization is fm's strength).
 
 ## Next up
 
-All planned phases and findings are addressed (2026-11-13): agent bats
-coverage landed (multi-step plans, risky gating, tool gating, resume — via a
-response queue in the llm stub) and `ai --json` shipped for scripting.
-Remaining ideas are nice-to-haves: an end-to-end pass against the real
-models, and the `ai /summarize` lane from the fm decision above if on-device
-summarization ever becomes interesting.
+Phases 1–6 are complete (2026-11-13). Ideas, roughly by value:
+
+- Prompt work driven by `/selftest`: both models fail values containing
+  `/` in `sed` — add a rule ("use `|` as the sed delimiter when the value
+  contains `/`") and macOS `sed -i ''` guidance, then re-score.
+- Tune the reviewer to keep the requested action (don't downgrade `-delete`
+  to `-print` when deletion was asked for); add selftest cases for review.
+- `/selftest --json` and a published score table per model in the README.
+- The `ai /summarize` lane from the fm decision, if on-device summarization
+  ever becomes interesting.

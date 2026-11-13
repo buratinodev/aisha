@@ -41,9 +41,14 @@ Perfect for:
 - **Colorized Output**: Preserves colors in ls, grep, diff, and tree commands
 - **OS-Aware**: Auto-detects your operating system for platform-specific commands
 - **Agent Mode**: Autonomous multi-step task execution with tool use, checkpoints, and safety controls
-- **Dual Models**:
-  - **Task model** (`AI_MODEL_TASK`): Fast model for command suggestions and agent steps
-  - **Thinking model** (`AI_MODEL_THINKING`): Reasoning model for deep analysis, explanations, and auto-fix
+- **One model, many modes**: a single resident model (`AISHA_MODEL`) serves
+  every mode; modes differ in prompt and in whether the model thinks first
+- **Second-opinion review**: risky and config/system-file-editing commands
+  (`sed -i`, redirects into dotfiles or `/etc`, `chmod`, ...) get a thinking
+  review pass before they reach you; a safer alternative replaces a flawed one
+- **`ai /selftest`**: score your installed model on sed/awk/grep config tasks
+  with known answers
+- **`ai /config`**: view and change settings without hand-editing files
 - **Dual Personas**:
   - **sysadmin** (default): Concise, practical suggestions
   - **deep**: Step-by-step reasoning with edge case analysis (auto-selected for how/why/what/explain queries)
@@ -74,7 +79,7 @@ Either way, the installer:
   - `ollama` — via Homebrew on macOS (or a direct download of the latest
     [GitHub release](https://github.com/ollama/ollama/releases) to
     `~/.local/bin`), or the official install script on Linux
-- Prints the model-pull commands for your hardware tier
+- Prints the `ollama pull` command for the default model
 
 Nothing is installed without asking — each missing dependency gets a Y/n
 prompt, and in non-interactive runs the installer only prints instructions.
@@ -86,13 +91,18 @@ source ~/.zshrc  # or source ~/.bashrc for bash users
 
 ### Upgrading
 
-Re-run the installer from an updated clone — it detects the installed
-version and upgrades in place:
-
 ```bash
-git pull && ./aisha.sh --install
-# ✓ Upgraded aisha 0.3.0 → 0.4.0
+ai --upgrade
+# Checking https://raw.githubusercontent.com/buratinodev/aisha/main for updates...
+# Upgrading aisha 0.5.0 → 0.6.0
+# Also upgrade the llm-ollama plugin? [Y/n]:
+# Also update the model gemma4:e4b-mlx (ollama pull)? [Y/n]:
 ```
+
+Downloads the latest release, installs it with its own installer (never
+downgrades), then offers to update the `llm-ollama` plugin and pull the
+latest build of your configured model. From a clone, `git pull &&
+./aisha.sh --install` does the same for aisha itself.
 
 ### Uninstall
 
@@ -136,38 +146,32 @@ You need the `llm` CLI tool with a configured model:
    pip install llm
    ```
 
-2. Install the Ollama plugin and pull models sized for your machine:
+2. Install the Ollama plugin and pull a model:
    ```bash
    llm install llm-ollama
+   ollama pull gemma4:e4b-mlx    # the default — ~9.5 GB, supports thinking
    ```
 
-   **48 GB MacBook Pro (M-series) — the defaults:**
-   ```bash
-   ollama pull qwen3.6:35b-mlx   # Task model (23 GB) — agentic coding + command suggestions
-   ollama pull gemma4:31b-mlx    # Thinking model (19 GB) — deep analysis & explanations
-   ```
+   **One model with thinking is the recommended setup.** A single resident
+   model means no swapping between models when you switch modes; the modes
+   differ only in prompt and in whether the model thinks first (Ollama's
+   `think` option, see `AISHA_THINK`). In local tests `gemma4:e4b-mlx`
+   answered in ~1–5 s, beat `qwen3.5:4b-mlx` on correctness at a fraction
+   of the time, and with thinking on avoided mistakes it made without it
+   (e.g. `find / … -delete` instead of `find . …`).
 
-   **16 GB MacBook:**
+   To use another model:
    ```bash
-   ollama pull gemma4:e4b-mlx    # Task model (~9.5 GB) — 4B-effective edge model, fast & light to run
-   ollama pull qwen3.5:9b-mlx    # Thinking model (~7 GB) — supports thinking, strong at code
+   ai /config set AISHA_MODEL qwen3.5:9b-mlx
+   ai /selftest                  # check how it does on known tasks
    ```
-   then in `~/.config/aisha/config`:
-   ```bash
-   AISHA_MODEL_TASK="gemma4:e4b-mlx"
-   AISHA_MODEL_THINKING="qwen3.5:9b-mlx"
-   ```
-   `e4b` is built for edge deployment: only ~4B parameters are active per
-   token, so suggestions come back fast and cool. `gemma4:12b-mlx` (7.7 GB —
-   smaller download, but dense 12B compute) is the "max quality in budget"
-   alternative if you prefer smarter over snappier. On a 16 GB machine Ollama
-   will swap between the two models on demand; if that gets annoying, set
-   both roles to `qwen3.5:9b-mlx` and live in one model.
+   Bigger machines can run a larger model the same way (e.g.
+   `gemma4:26b-mlx`, MoE with 4B active parameters, or `qwen3.6:35b-mlx`).
+   Models without thinking support work too — aisha detects the rejection
+   and retries without the option.
 
    On Apple Silicon, always prefer the `-mlx` tags — they run on the MLX
-   backend and are meaningfully faster than the default GGUF builds. Any
-   other models work too: set `AISHA_MODEL_TASK` and `AISHA_MODEL_THINKING`
-   in the config file or environment.
+   backend and are meaningfully faster than the default GGUF builds.
 
    > **Why not Apple's on-device model (`fm` CLI)?** Considered and
    > rejected: its 4K shared context and Apple's own warning against code
@@ -275,6 +279,45 @@ ai /tips awk     # five model-generated one-liners about any topic
 ai --version
 ```
 
+### Settings: `ai /config`
+
+```bash
+ai /config                              # effective settings and where each comes from
+ai /config set AISHA_MODEL qwen3.5:9b-mlx
+ai /config set think off                # AISHA_ prefix optional, case-insensitive
+ai /config unset AISHA_THINK
+ai /config edit                         # open in $VISUAL / $EDITOR
+```
+
+Unknown keys and invalid values are rejected; the file is rewritten
+atomically and other lines are kept. The model also knows this command —
+`ai set qwen3.5:9b-mlx as my model` suggests `ai /config set ...` instead of
+hand-editing files.
+
+### Model self-test: `ai /selftest`
+
+```bash
+ai /selftest                  # the configured model
+ai /selftest qwen3.5:9b-mlx   # any installed model, without switching
+```
+
+Eleven fixed tasks on config-style files — in-place `sed` edits (including
+values with slashes and replace-all), appending to a dotfile, `grep`
+filtering/counting/recursive search, `awk` columns and sums, extracting a
+config value. Each case creates sample files in a throwaway directory
+(with `HOME` pointed at it), runs the model's command there, and checks the
+**result** — the edited file or the output — not the command text, so any
+working command passes and GNU-only flags on macOS fail. Commands flagged
+risky are never run.
+
+```
+✓ sed: change a value in place (6.2s)
+✗ sed: value containing slashes (4.6s)
+    sed -i '' 's/^DATABASE_URL=.*/DATABASE_URL=postgres://db:5432/app/' .env
+    .env is now: ...
+9/11 passed in 41.3s
+```
+
 ### Risky Command Handling
 
 Risky commands (sudo, rm, dd, kubectl delete, ...) always get a red warning
@@ -306,9 +349,30 @@ ai redo
 - `terraform apply/destroy` - infrastructure changes
 - `gcloud delete` - cloud resource deletion
 
+### Review of Sensitive Commands
+
+Risky commands and commands that edit config or system files (`sed -i`,
+`perl -i`, `>`/`>>` into dotfiles, `~`, or `/etc`, `tee`, `chmod`/`chown`,
+`defaults write`, `launchctl`, `crontab`, ...) get a second, thinking pass
+that checks the command against your request: right file, right scope,
+append vs overwrite, a backup for edited configs, macOS vs GNU flags.
+
+```bash
+ai change a to b in my zshrc
+# 🔎 Review: edits ~/.zshrc without a backup
+#   original: sed -i '' 's/a/b/' ~/.zshrc
+# Suggested command:
+#   sed -i.bak 's/a/b/' ~/.zshrc
+```
+
+When the review finds a problem and offers a safer command, the safer one is
+what lands in your input line (the original is shown). `--json` output
+includes a `review` object. Disable with `ai /config set AISHA_REVIEW 0`.
+The reviewer is the same model — a second look, not a guarantee.
+
 ### Explanation Mode
 
-Get a detailed explanation of the last suggested command (uses the thinking model):
+Get a detailed explanation of the last suggested command:
 
 ```bash
 ai explain
@@ -316,11 +380,10 @@ ai explain
 # what it does, and any potential risks
 ```
 
-Queries starting with how/why/what/explain/help are automatically routed to the thinking model with the deep persona:
+Queries starting with how/why/what/explain/help get the deep persona:
 
 ```bash
 ai what is the difference between hard links and symlinks
-# Uses AI_MODEL_THINKING for step-by-step analysis
 ```
 
 ### Agent Mode
@@ -440,10 +503,9 @@ ai rerun
 ai explain
 ```
 
-**Deep thinking mode** (uses the thinking model):
+**Deep thinking mode** (deep persona, thinking on):
 ```bash
 ai --deep migrate database from postgres to mysql
-# Uses AI_MODEL_THINKING for thorough analysis with edge cases
 ```
 
 ## Safety Features
@@ -475,9 +537,9 @@ ai --deep migrate database from postgres to mysql
 
 ## Shell Integration
 
-Tab completion for subcommands and flags (`redo`, `explain`, `/help`, `/tips`,
-`--deep`, `--agent`, `-n`, `-c`, ...) is registered in both zsh (requires
-`compinit`) and bash.
+Tab completion for subcommands and flags (`redo`, `explain`, `/config`,
+`/selftest`, `/help`, `/tips`, `--deep`, `--agent`, `-n`, `-c`, ...) is
+registered in both zsh (requires `compinit`) and bash.
 
 When running in zsh, aisha enables two additional quality-of-life features:
 
@@ -511,14 +573,13 @@ you reviewing the command in your input line is the real safety layer.
 
 1. Detects your OS at startup (e.g., `Darwin/arm64 macOS 15.3`)
 2. Captures context (shell history, pwd, git status, last exit code)
-3. Routes to the appropriate model:
-   - **Task model**: command suggestions, conversational queries, agent steps
-   - **Thinking model**: `--deep` mode, how/why/what/explain queries, auto-fix, `ai explain`
-4. Sends your prompt + context + OS info to the selected LLM
+3. Picks the mode — every mode uses the same model (`AISHA_MODEL`), with its
+   own prompt and thinking on or off (see the table under Customization)
+4. Sends your prompt + context + OS info to the model
 5. Gets back a suggested command (or a direct answer for informational queries)
-6. Presents it for review
-7. Confirms before execution (stricter for risky commands)
-8. Executes and saves output
+6. Reviews it with a second thinking pass if it is risky or edits config/system files
+7. Presents it for review in your input line
+8. Confirms before execution when aisha runs it itself (stricter for risky commands)
 
 ## File Structure
 
@@ -556,12 +617,12 @@ session directories from closed shells are pruned automatically.
 ## Customization
 
 All settings are environment variables with sensible defaults. The cleanest
-way to customize is the config file — plain shell assignments, read at load,
-survives updates:
+way to customize is `ai /config set` (or the config file it writes — plain
+shell assignments, read at load, survives updates):
 
 ```bash
 # ~/.config/aisha/config
-AISHA_MODEL_TASK="llama3.3:70b"
+AISHA_MODEL="qwen3.5:9b-mlx"
 AISHA_AGENT_MAX_STEPS=25
 AISHA_AUTORUN=1        # classic confirm-and-run instead of buffer injection
 AISHA_STDIN_CONTEXT=0  # never read piped stdin as context
@@ -570,21 +631,26 @@ AISHA_STDIN_CONTEXT=0  # never read piped stdin as context
 Exporting the same variables before the aisha loader in your shell rc file
 works too (the config file takes precedence).
 
-### Change the LLM Models
+### Model and Thinking
 ```bash
-AISHA_MODEL_TASK="qwen3.6:35b-mlx"      # Fast model for command suggestions & agent steps
-AISHA_MODEL_THINKING="gemma4:31b-mlx"   # Reasoning model for deep analysis & explanations
+AISHA_MODEL="gemma4:e4b-mlx"   # the one model every mode uses
+AISHA_THINK=auto               # auto (per mode, below) | on | off
+AISHA_REVIEW=1                 # second-pass review of sensitive commands
 ```
 
-| Feature | Model Used |
-|---------|------------|
-| Command suggestions | `AISHA_MODEL_TASK` |
-| Conversational queries | `AISHA_MODEL_TASK` |
-| `--deep` mode | `AISHA_MODEL_THINKING` |
-| how/why/what/explain queries | `AISHA_MODEL_THINKING` |
-| `ai explain` | `AISHA_MODEL_THINKING` |
-| Auto-fix (failed commands) | `AISHA_MODEL_THINKING` |
-| Agent mode | `AISHA_MODEL_TASK` |
+| Mode | Thinking (`auto`) |
+|------|-------------------|
+| Command suggestions, `ai -c` refine | on |
+| Review of sensitive commands | on |
+| Auto-fix, `ai rerun`, piped-input diagnosis | on |
+| `--deep` | on |
+| Agent steps | on |
+| how/why/what/explain questions, `ai explain` | off (answers stream immediately) |
+| `ai /tips <topic>` | off |
+
+Thinking is on wherever a command may end up being run: correctness over
+speed. `AISHA_MODEL_TASK` / `AISHA_MODEL_THINKING` from earlier versions are
+no longer used; aisha warns if it finds them.
 
 ### Agent Settings
 
@@ -626,8 +692,8 @@ Add new persona modes by extending the persona flag logic around line 52.
 - bash or zsh shell
 - `python3` (3.8+) — runs the aisha core
 - `llm` CLI tool with `llm-ollama` plugin
-- LLM models via Ollama — defaults assume ~48 GB RAM (`qwen3.6:35b-mlx` for
-  tasks, `gemma4:31b-mlx` for thinking); see Prerequisites for a 16 GB tier
+- LLM model via Ollama — default `gemma4:e4b-mlx` (~9.5 GB; fine on 16 GB
+  Apple Silicon)
 
 ## Development
 
