@@ -322,6 +322,14 @@ teardown() {
   [ "$(grep -c ARGS "$AISHA_TEST_LLM_LOG")" -eq 2 ]
 }
 
+@test "model names are retried with the ollama/ prefix (llm-ollama >= 0.19)" {
+  export AISHA_TEST_LLM_RESPONSE="df -h" AISHA_TEST_LLM_PREFIXED=1
+  run bash -c 'source "$AISHA_SH"; ai -n show disk usage < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$output" = "df -h" ]
+  grep -q -- "-m ollama/test-model -o think true" "$AISHA_TEST_LLM_LOG"
+}
+
 @test "legacy AISHA_MODEL_TASK triggers a migration warning" {
   export AISHA_TEST_LLM_RESPONSE="df -h" AISHA_MODEL_TASK=old-model
   run bash -c 'source "$AISHA_SH"; ai -n show disk usage < /dev/null'

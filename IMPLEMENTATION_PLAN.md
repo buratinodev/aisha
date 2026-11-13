@@ -360,6 +360,17 @@ Also: `ai /selftest`, `/config`, `--upgrade` in help and completion;
 installer prints a single `ollama pull`; tests isolate prompts from the
 developer's terminal via `AISHA_TTY`. Test suite: 57.
 
+**0.6.1 follow-ups (same day):** the first real `ai --upgrade` ran
+`llm install -U llm-ollama`, which also upgraded llm 0.28 → 0.37.2 and
+llm-ollama 0.15.1 → 0.19.1, and broke two assumptions: llm-ollama 0.19
+registers models as `ollama/<name>` (bare names now fail with "Unknown
+model"), and llm 0.37 prints reasoning to stderr. aisha now retries with
+the other naming on "Unknown model" (works with old and new plugins) and
+only surfaces llm's stderr when the call fails. Also fixed: re-sourcing
+0.6 over a pre-0.5 shell left the zsh `accept-line` wrapper without an
+original widget ("No such widget"); it now falls back to `.accept-line`.
+Test suite: 58.
+
 ---
 
 ## Decisions log

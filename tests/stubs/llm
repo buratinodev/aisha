@@ -15,6 +15,12 @@ if [[ -n "$AISHA_TEST_LLM_NO_THINK" && " $* " == *" -o think "* ]]; then
   exit 1
 fi
 
+# Simulate llm-ollama >= 0.19, which only knows "ollama/<name>" model IDs
+if [[ -n "$AISHA_TEST_LLM_PREFIXED" && " $* " != *" -m ollama/"* ]]; then
+  echo "Error: 'Unknown model: $2'" >&2
+  exit 1
+fi
+
 if [[ -n "$AISHA_TEST_LLM_QUEUE" && -s "$AISHA_TEST_LLM_QUEUE" ]]; then
   python3 - "$AISHA_TEST_LLM_QUEUE" <<'EOF'
 import sys

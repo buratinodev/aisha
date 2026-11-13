@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -414,8 +414,7 @@ def think_for(mode):
     return MODES[mode]
 
 
-def llm_args(mode, files, prompt, think=True):
-    model = cfg("AISHA_MODEL")
+def llm_args(model, mode, files, prompt, think=True):
     args = ["llm", "-m", model]
     if think and model not in NO_THINK_MODELS:
         args += ["-o", "think", "true" if think_for(mode) else "false"]
@@ -426,22 +425,43 @@ def llm_args(mode, files, prompt, think=True):
     return args
 
 
-def _think_rejected(rc, stderr):
-    if rc != 0 and "think" in stderr.lower():
-        NO_THINK_MODELS.add(cfg("AISHA_MODEL"))
-        return True
-    return False
+def model_candidates():
+    # llm-ollama >= 0.19 registers models as "ollama/<name>"; older versions without the prefix
+    model = cfg("AISHA_MODEL")
+    if model.startswith("ollama/"):
+        return [model, model[len("ollama/"):]]
+    return [model, "ollama/" + model]
+
+
+def _run_llm(mode, files, prompt, runner):
+    """Try each model name, first with and then without the think option.
+    runner(args) returns (rc, stderr, produced_output, result)."""
+    last = (0, "", False, "")
+    for model in model_candidates():
+        for think in (True, False):
+            last = runner(llm_args(model, mode, files, prompt, think))
+            rc, stderr, produced, result = last
+            if rc != 0 and not produced:
+                low = stderr.lower()
+                if "unknown model" in low:
+                    break
+                if think and "think" in low:
+                    NO_THINK_MODELS.add(model)
+                    continue
+            # llm >= 0.37 prints reasoning to stderr on success; show stderr only for errors
+            if rc != 0:
+                sys.stderr.write(stderr)
+            return result
+    sys.stderr.write(last[1])
+    return last[3]
 
 
 def llm_capture(mode, files, prompt):
+    def runner(args):
+        r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return r.returncode, r.stderr, bool(r.stdout), r.stdout
     try:
-        for think in (True, False):
-            r = subprocess.run(llm_args(mode, files, prompt, think),
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if think and _think_rejected(r.returncode, r.stderr):
-                continue
-            sys.stderr.write(r.stderr)
-            return r.stdout
+        return _run_llm(mode, files, prompt, runner)
     except FileNotFoundError:
         err("llm CLI not found — install it with: pip install llm")
     return ""
@@ -450,14 +470,10 @@ def llm_capture(mode, files, prompt):
 def llm_stream_render(mode, files, prompt):
     """Stream llm output through the renderer; returns the full raw text."""
     env = dict(os.environ, PYTHONUNBUFFERED="1")
-    for think in (True, False):
-        try:
-            p = subprocess.Popen(llm_args(mode, files, prompt, think),
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, env=env)
-        except FileNotFoundError:
-            err("llm CLI not found — install it with: pip install llm")
-            return ""
+
+    def runner(args):
+        p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, env=env)
         rend = MarkdownRenderer()
         captured = []
         assert p.stdout is not None and p.stderr is not None
@@ -466,11 +482,11 @@ def llm_stream_render(mode, files, prompt):
             rend.feed(line.rstrip("\n"))
             sys.stdout.flush()
         stderr = p.stderr.read()
-        rc = p.wait()
-        if think and not captured and _think_rejected(rc, stderr):
-            continue
-        sys.stderr.write(stderr)
-        return "".join(captured)
+        return p.wait(), stderr, bool(captured), "".join(captured)
+    try:
+        return _run_llm(mode, files, prompt, runner)
+    except FileNotFoundError:
+        err("llm CLI not found — install it with: pip install llm")
     return ""
 
 
