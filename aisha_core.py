@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -39,6 +39,7 @@ DEFAULTS = {
     "AISHA_AUTORUN": "0",
     "AISHA_STDIN_CONTEXT": "1",
     "AISHA_AGENT_MAX_STEPS": "15",
+    "AISHA_AGENT_PLAN": "1",   # agent shows a plan and asks approval before acting
     "AISHA_AGENT_TOOLS": "command,read_file,write_file,search,web_fetch,list_dir",
     "AISHA_RISKY_EXTRA": "",   # extra risky-pattern regex (ERE), user supplied
     "AISHA_RISKY_ALLOW": "",   # allowlist regex — matching commands are never flagged
@@ -207,6 +208,7 @@ RISKY_PATTERNS = [
     r'\bfind\b.*(-delete\b|-exec\s+(rm|shred)\b)',
     r'\bmv\b.*\bdeleted\b',
     r'\bkubectl\s+delete\b',
+    r'\bdocker\s+((container|image|volume|network|system|builder)\s+)?(prune|rm|rmi)\b',
     r'\bterraform\s+(apply|destroy)\b',
     r'\bgcloud\b.*\bdelete\b',
     r'\bgit\s+push\b.*(--force\b|-f\b)',
@@ -250,6 +252,7 @@ SENSITIVE_PATTERNS = [
     r'\btee\b',
     r'\b(chmod|chown|chgrp)\b',
     r'\b(defaults\s+(write|delete)|launchctl|systemctl|crontab|visudo)\b',
+    r'\bdocker\s+((container)\s+)?(stop|kill|restart)\b',
     r'\b(mv|cp|ln)\b[^|;&]*\s(~|\$HOME)?/?\.[A-Za-z]',
     r'(^|\s)/etc/',
 ]
@@ -578,11 +581,17 @@ def ctx_files(*names):
     return [os.path.join(CTX, n) for n in names]
 
 
+HISTORY_NOTE = (
+    "history.txt lists the user's recent shell commands, newest last; their OUTPUT is not "
+    "available. When the request refers to earlier output ('the above', 'these', 'that error', "
+    "'those containers'), it means the output of the most recent relevant command in history.txt.")
+
+
 AISHA_SELF = (
     "About aisha itself (the assistant you are part of): its settings are changed ONLY with "
     "`ai /config set KEY VALUE` (e.g. `ai /config set AISHA_MODEL qwen3.5:9b-mlx`); "
     "keys: AISHA_MODEL, AISHA_THINK, AISHA_REVIEW, AISHA_AUTORUN, AISHA_STDIN_CONTEXT, "
-    "AISHA_AGENT_MAX_STEPS, AISHA_RISKY_EXTRA, AISHA_RISKY_ALLOW. "
+    "AISHA_AGENT_MAX_STEPS, AISHA_AGENT_PLAN, AISHA_RISKY_EXTRA, AISHA_RISKY_ALLOW. "
     "Never edit ~/.aisha or ~/.aisha-core.py — those files are the program, not config.")
 
 
@@ -851,6 +860,7 @@ CONFIG_CHOICES = {
     "AISHA_THINK": ("auto", "on", "off"),
     "AISHA_REVIEW": ("0", "1"),
     "AISHA_AUTORUN": ("0", "1"),
+    "AISHA_AGENT_PLAN": ("0", "1"),
     "AISHA_STDIN_CONTEXT": ("0", "1"),
 }
 
@@ -939,7 +949,9 @@ def cmd_config(args):
 # /selftest — known prompts, known outcomes, run against the installed model
 # ============================================================================
 
-SUGGEST_RULES = """The user's request is in the attached last_prompt.txt.
+SUGGEST_RULES = f"""The user's request is in the attached last_prompt.txt.
+{HISTORY_NOTE} Build the command from that earlier command (reuse its
+filters or target) rather than asking for IDs you cannot see.
 
 Rules:
 - If the request is a shell/system task, output ONLY the command (no explanation). Most requests are tasks.
@@ -1110,7 +1122,7 @@ def cmd_help():
 - `-n, --no-exec` — print the suggested command only (for scripts and pipes)
 - `--json` — machine-readable output: {{"type","command","risky","model"}}
 - `-c, --refine <feedback>` — revise the last suggestion ("use ripgrep instead")
-- `--agent <goal>` — autonomous multi-step mode (`--agent --resume` to continue)
+- `--agent <goal>` — multi-step mode: shows a plan, runs it after your OK (`--agent --resume` to continue)
 - `--agent-safe <goal>` — agent mode, confirm every step
 - `--version` — print version
 - `--install` / `--uninstall` — install or remove aisha
@@ -1340,6 +1352,50 @@ class Agent:
             return f"ERROR: Failed to fetch {url}: {e}", 1
 
     # ---- prompts ----
+    def plan_prompt(self):
+        return f"""You are an autonomous shell agent. The user's OS is: {os_info()}
+The goal is in the attached goal.txt.
+{HISTORY_NOTE}
+
+Write a short plan to achieve the goal: a numbered list of at most 8 steps, one line each.
+Inspect before acting (read-only steps first). Append [changes] to every step that modifies
+files, processes, containers, packages, or remote systems. Name concrete commands where known.
+Stay strictly within the goal: no extra cleanup, pruning, or "while we're at it" steps.
+Output ONLY the numbered list — no preamble, no code fences."""
+
+    def approve_plan(self, files):
+        """Generate the plan, show it, and ask for approval. Returns True to proceed."""
+        thinking_start()
+        raw = llm_capture("agent", files, self.plan_prompt())
+        thinking_end()
+        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.S)
+        steps = [ln.strip() for ln in raw.splitlines() if re.match(r'^\s*\d+[.)]\s', ln)]
+        if not steps:
+            err("  The model returned no plan — aborting.")
+            return False
+        write_text(os.path.join(self.dir, "plan.txt"), "\n".join(steps) + "\n")
+        out(f"  {CYAN}📋 Plan{RESET}")
+        for s in steps:
+            # Don't rely on the model's own [changes] tags
+            if is_risky(s):
+                out(f"    {RED}{s}  ⚠️{RESET}")
+            elif "[changes]" in s or needs_review(s):
+                out(f"    {YELLOW}{s}{RESET}")
+            else:
+                out(f"    {WHITE}{s}{RESET}")
+        out("")
+        if self.mode != "safe":
+            out(f"  {DIM}Risky steps will still ask for YES. Use --agent-safe to approve every step.{RESET}")
+        sys.stdout.write(f"  {GREEN}Execute this plan? [Y/n]:{RESET} ")
+        sys.stdout.flush()
+        reply, ok = read_reply()
+        if not ok or (reply.strip().lower() or "y") not in ("y", "yes"):
+            out(f"  {YELLOW}Plan not approved — nothing was run.{RESET}")
+            out("")
+            return False
+        out("")
+        return True
+
     def step_prompt(self, step, total):
         return f"""You are an autonomous shell agent working toward a goal.
 The user's OS is: {os_info()}
@@ -1349,6 +1405,11 @@ The goal is in the attached goal.txt.
 STEP: {step} of {self.max_steps} (total: {total})
 
 The attached history_context.txt contains your previous steps.
+If plan.txt is attached, it is the plan the user approved: follow it in order. Adapt to what
+you observe, but never take a [changes] action that the plan does not cover — if one is
+needed, reply FAILED and explain, so the user can re-plan.
+{HISTORY_NOTE} To see that output, re-run that command first if it is
+read-only (e.g. `docker ps -a`, `ls`, `git status`) — never re-run one that changes things.
 
 AVAILABLE TOOLS:
 - COMMAND: <shell command>         — Execute a shell command
@@ -1410,6 +1471,15 @@ Rules:
         self.header()
         capture_context(0)
 
+        base_files = [
+            os.path.join(CTX, "history.txt"),
+            os.path.join(CTX, "pwd.txt"),
+            os.path.join(CTX, "git.txt"),
+            os.path.join(self.dir, "goal.txt"),
+        ]
+        if not resume and cfg("AISHA_AGENT_PLAN") == "1" and not self.approve_plan(base_files):
+            return 1
+
         iteration, total = start, 0
         while True:  # continuation loop
             while iteration < self.max_steps:  # step loop
@@ -1419,10 +1489,8 @@ Rules:
                 write_text(os.path.join(self.dir, "history_context.txt"),
                            self.history_context())
                 thinking_start()
-                raw = llm_capture("agent", [
-                    os.path.join(CTX, "pwd.txt"),
-                    os.path.join(CTX, "git.txt"),
-                    os.path.join(self.dir, "goal.txt"),
+                raw = llm_capture("agent", base_files + [
+                    os.path.join(self.dir, "plan.txt"),
                     os.path.join(self.dir, "history_context.txt"),
                 ], self.step_prompt(iteration, total))
                 thinking_end()
@@ -2013,6 +2081,7 @@ Explain clearly and concisely. If one shell command is directly useful as a next
 (no code fences, nothing after it):
 COMMAND: <the command>
 Otherwise omit that line.
+{HISTORY_NOTE}
 The user's question is in the attached last_prompt.txt. If stdin.txt is attached, it is data the user piped in — treat it as the subject of the question."""
         explain_files = (ctx_files("history.txt", "pwd.txt", "git.txt")
                          + [spath("last_prompt.txt")] + extra_files)

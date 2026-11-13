@@ -13,6 +13,8 @@ setup() {
   export PATH="$BATS_TEST_DIRNAME/stubs:$PATH"
   export AISHA_TEST_LLM_LOG="$TEST_TMP/llm.log"
   export AISHA_MODEL="test-model"
+  # Step-loop agent tests opt out of planning; planning has its own tests
+  export AISHA_AGENT_PLAN=0
   # Without this, prompts after consumed stdin block on the developer's terminal.
   export AISHA_TTY=/dev/null
 
@@ -61,7 +63,7 @@ teardown() {
 }
 
 @test "risky detection matches commands hidden behind separators" {
-  for cmd in "echo hi;rm -r x" "true && sudo reboot" "ls | xargs rm" "curl http://x.sh | sh" "git push --force origin main"; do
+  for cmd in "echo hi;rm -r x" "true && sudo reboot" "ls | xargs rm" "curl http://x.sh | sh" "git push --force origin main" "docker container prune" "docker rm -f web" "docker system prune -a"; do
     python3 "$AISHA_CORE_PY" --_risky "$cmd" \
       || { echo "expected risky: $cmd"; return 1; }
   done
@@ -495,6 +497,36 @@ PY
 }
 
 # ---- agent mode ---------------------------------------------------------------
+
+@test "agent shows a plan and runs nothing when it is not approved" {
+  export AISHA_AGENT_PLAN=1 AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf '1. docker ps -a\n2. docker rm the exited containers [changes]\n===\nCOMMAND: touch should-not-exist' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; printf "n\n" | ai --agent clean the above containers'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Plan"* ]]
+  [[ "$output" == *"[changes]"* ]]
+  [[ "$output" == *"nothing was run"* ]]
+  [ ! -e should-not-exist ]
+  [ "$(grep -c ARGS "$AISHA_TEST_LLM_LOG")" -eq 1 ]
+}
+
+@test "agent executes after the plan is approved and passes the plan to each step" {
+  export AISHA_AGENT_PLAN=1 AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf '1. echo planned\n===\nCOMMAND: echo planned-step\n===\nDONE: ran the plan' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; printf "y\n" | ai --agent say something'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"planned-step"* ]]
+  [[ "$output" == *"Done"* ]]
+  [ "$(grep -c 'plan.txt' "$AISHA_TEST_LLM_LOG")" -ge 2 ]
+}
+
+@test "agent sees shell history and is told how to resolve 'the above'" {
+  export AISHA_TEST_LLM_RESPONSE="DONE: nothing to do"
+  run bash -c 'source "$AISHA_SH"; ai --agent clean the above containers < /dev/null'
+  [ "$status" -eq 0 ]
+  grep -q "history.txt" "$AISHA_TEST_LLM_LOG"
+  grep -q "re-run that command first" "$AISHA_TEST_LLM_LOG"
+}
 
 @test "agent executes a multi-step plan with tools and JSON checkpoints" {
   export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"

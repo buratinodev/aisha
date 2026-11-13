@@ -382,6 +382,19 @@ questions may end with a `COMMAND: <cmd>` line (like auto-fix's `FIX:`),
 hidden from the rendered answer and delivered to the input line. `--json`
 adds `explanation` / `command` fields accordingly. Test suite: 62.
 
+**0.6.3 — agent context and plan-first:** `ai --agent clean the above
+containers` (after `docker ps -a`) listed the cwd instead: the agent never
+received history.txt. Now every mode gets `HISTORY_NOTE` (history has
+commands, not output; "the above" = output of the latest relevant command)
+and the agent re-runs read-only commands to see it. The agent now plans
+first (`AISHA_AGENT_PLAN=1`): numbered plan → shown with aisha's own
+risk colouring (the model's `[changes]` tags proved unreliable) → Y/n →
+execution with plan.txt attached; a changing action outside the plan must
+end in FAILED. The first real plan included `docker system prune -a`
+(deletes all images — far beyond the goal); a "stay strictly within the
+goal" rule fixed it. `docker rm/rmi/prune` are now risky, `docker
+stop/kill/restart` sensitive. Test suite: 65.
+
 ---
 
 ## Decisions log

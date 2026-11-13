@@ -388,7 +388,28 @@ ai what is the difference between hard links and symlinks
 
 ### Agent Mode
 
-For complex, multi-step tasks, use agent mode. The agent autonomously plans and executes a sequence of actions to achieve your goal:
+For complex, multi-step tasks, use agent mode. The agent first shows a plan
+and waits for your OK, then executes it step by step:
+
+```bash
+ai --agent clean the above containers
+#   📋 Plan
+#     1. docker ps -a
+#     2. docker stop $(docker ps -aq)
+#     3. docker rm $(docker ps -aq)  ⚠️
+#
+#   Execute this plan? [Y/n]:
+```
+
+Read-only steps are white, steps that change things are yellow, risky ones
+red with ⚠️ (aisha marks these itself rather than trusting the model). The
+agent follows the approved plan and stops with FAILED instead of taking a
+changing action the plan doesn't cover. Risky steps still require typing
+YES during execution. Skip planning with `ai /config set AISHA_AGENT_PLAN 0`.
+
+The agent sees your recent shell history (not its output), so "the above
+containers" resolves to your last `docker ps -a` — it re-runs read-only
+commands like that to see the output.
 
 ```bash
 ai --agent set up a new git repo with .gitignore for Node.js
