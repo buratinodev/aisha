@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -1890,12 +1890,56 @@ def cmd_upgrade():
             if rc != 0:
                 return rc
 
-    if _which("llm") and _ask("Also upgrade the llm-ollama plugin?"):
-        _run_visible(["llm", "install", "-U", "llm-ollama"])
+    if _which("llm") and sys.stdin.isatty():
+        upgrade_plugin()
     model = cfg("AISHA_MODEL")
-    if _which("ollama") and _ask(f"Also update the model {model} (ollama pull)?"):
+    if _which("ollama") and _ask(f"Also re-pull the model {model} (ollama pull)?", default_yes=False):
         _run_visible(["ollama", "pull", model])
     return 0
+
+
+def _llm_versions():
+    """Installed (llm, llm-ollama) versions, or None for unknown."""
+    try:
+        llm_v = subprocess.run(["llm", "--version"], capture_output=True, text=True,
+                               timeout=30).stdout.strip().rsplit(" ", 1)[-1] or None
+        plugins = json.loads(subprocess.run(["llm", "plugins"], capture_output=True,
+                                            text=True, timeout=30).stdout or "[]")
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None, None
+    plugin_v = next((p.get("version") for p in plugins if p.get("name") == "llm-ollama"), None)
+    return llm_v, plugin_v
+
+
+def _pypi_latest(package):
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"https://pypi.org/pypi/{package}/json", timeout=10) as r:
+            return json.load(r)["info"]["version"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def upgrade_plugin():
+    """Offer an llm-ollama upgrade only when PyPI has a newer version; keep pip quiet."""
+    llm_before, installed = _llm_versions()
+    latest = _pypi_latest("llm-ollama")
+    if installed and latest and _version_tuple(latest) <= _version_tuple(installed):
+        out(f"{GREEN}✓ llm-ollama {installed} is up to date{RESET}")
+        return
+    label = f"{installed} → {latest}" if installed and latest else "latest version"
+    if not _ask(f"Upgrade the llm-ollama plugin ({label})?"):
+        return
+    r = subprocess.run(["llm", "install", "-U", "llm-ollama"], capture_output=True, text=True)
+    if r.returncode != 0:
+        err("  llm-ollama upgrade failed:")
+        sys.stderr.write(r.stdout + r.stderr)
+        return
+    llm_after, now = _llm_versions()
+    out(f"{GREEN}✓ llm-ollama {installed or '?'} → {now or '?'}{RESET}")
+    # pip -U also upgrades llm itself when the plugin requires it
+    if llm_before and llm_after and llm_before != llm_after:
+        out(f"{GREEN}✓ llm {llm_before} → {llm_after}{RESET} {DIM}(pulled in as a dependency){RESET}")
 
 
 def _remove_rc_block(rc_file):
