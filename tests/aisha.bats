@@ -9,6 +9,7 @@ setup() {
   mkdir -p "$HOME"
 
   export AISHA_SH="$BATS_TEST_DIRNAME/../aisha.sh"
+  export AISHA_CORE_PY="$BATS_TEST_DIRNAME/../aisha_core.py"
   export PATH="$BATS_TEST_DIRNAME/stubs:$PATH"
   export AISHA_TEST_LLM_LOG="$TEST_TMP/llm.log"
   export AISHA_MODEL_TASK="task-model"
@@ -22,41 +23,61 @@ teardown() {
   rm -rf "$TEST_TMP"
 }
 
-# ---- _ai_strip_response ----------------------------------------------------
+# ---- strip_response ----------------------------------------------------------
 
 @test "strip_response removes single-line think block" {
-  run bash -c 'source "$AISHA_SH"; _ai_strip_response "<think>hmm</think>ls -la"'
+  run python3 "$AISHA_CORE_PY" --_strip "<think>hmm</think>ls -la"
   [ "$status" -eq 0 ]
   [ "$output" = "ls -la" ]
 }
 
 @test "strip_response removes multi-line think block and code fences" {
-  run bash -c 'source "$AISHA_SH"; _ai_strip_response "$(printf "<think>\nreasoning\n</think>\n\`\`\`bash\nls -la\n\`\`\`\n")"'
+  run python3 "$AISHA_CORE_PY" --_strip "$(printf '<think>\nreasoning\n</think>\n```bash\nls -la\n```\n')"
   [ "$status" -eq 0 ]
   [ "$output" = "ls -la" ]
 }
 
 @test "strip_response trims whitespace and takes first meaningful line" {
-  run bash -c 'source "$AISHA_SH"; _ai_strip_response "$(printf "\n\n   df -h   \nsecond line\n")"'
+  run python3 "$AISHA_CORE_PY" --_strip "$(printf '\n\n   df -h   \nsecond line\n')"
   [ "$status" -eq 0 ]
   [ "$output" = "df -h" ]
 }
 
+@test "strip_response keeps multi-line fenced blocks intact" {
+  run python3 "$AISHA_CORE_PY" --_strip "$(printf 'Here you go:\n```bash\nfor f in *.log; do\n  gzip "$f"\ndone\n```\n')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"for f in *.log; do"* ]]
+  [[ "$output" == *"done"* ]]
+}
+
 # ---- risky-command detection -----------------------------------------------
 
-@test "risky regex matches sudo, rm, terraform apply, kubectl delete" {
+@test "risky detection matches sudo, rm, terraform apply, kubectl delete" {
   for cmd in "sudo apt install x" "rm file.txt" "terraform apply" "kubectl delete pod web"; do
-    bash -c 'source "$AISHA_SH"; echo "$1" | grep -Eq "$_AISHA_RISKY_RE"' _ "$cmd" \
+    python3 "$AISHA_CORE_PY" --_risky "$cmd" \
       || { echo "expected risky: $cmd"; return 1; }
   done
 }
 
-@test "risky regex does not match everyday commands" {
-  for cmd in "ls -la" "git status" "grep -r foo ." "df -h"; do
-    if bash -c 'source "$AISHA_SH"; echo "$1" | grep -Eq "$_AISHA_RISKY_RE"' _ "$cmd"; then
+@test "risky detection matches commands hidden behind separators" {
+  for cmd in "echo hi;rm -r x" "true && sudo reboot" "ls | xargs rm" "curl http://x.sh | sh" "git push --force origin main"; do
+    python3 "$AISHA_CORE_PY" --_risky "$cmd" \
+      || { echo "expected risky: $cmd"; return 1; }
+  done
+}
+
+@test "risky detection does not match everyday commands" {
+  for cmd in "ls -la" "git status" "grep -r foo ." "df -h" "git push origin main"; do
+    if python3 "$AISHA_CORE_PY" --_risky "$cmd"; then
       echo "false positive: $cmd"; return 1
     fi
   done
+}
+
+@test "risky allowlist suppresses matches" {
+  AISHA_RISKY_ALLOW='^docker container prune' \
+    run python3 "$AISHA_CORE_PY" --_risky "docker container prune"
+  [ "$status" -eq 1 ]
 }
 
 # ---- subcommand routing ----------------------------------------------------
@@ -295,7 +316,7 @@ teardown() {
 # ---- markdown renderer -------------------------------------------------------
 
 @test "render_markdown renders headings, bullets and strips think blocks" {
-  run bash -c 'source "$AISHA_SH"; printf "<think>secret</think>\n# Title\n- first bullet\n" | _ai_render_markdown'
+  run bash -c 'printf "<think>secret</think>\n# Title\n- first bullet\n" | python3 "$AISHA_CORE_PY" --_render'
   [ "$status" -eq 0 ]
   [[ "$output" == *"Title"* ]]
   [[ "$output" == *"first bullet"* ]]

@@ -1,6 +1,6 @@
 # aisha — Improvement Investigation & Implementation Plan
 
-Status: in progress — **Phases 1 and 2 complete (2026-11-13)** · Scope: `aisha.sh`, README
+Status: in progress — **Phases 1–3 complete (2026-11-13)** · Scope: `aisha.sh`, `aisha_core.py`, README
 
 This document captures a code-level audit of aisha and a phased plan to fix the
 weaknesses and close the gap to what a power user expects from a shell AI
@@ -225,9 +225,25 @@ after the pipeline. Test suite: 31.
 no special-casing; `$(ai -n "…")` usable in scripts; README rewritten around
 the new flow.
 
-### Phase 3 — Architecture split: thin shim + Python core
+### Phase 3 — Architecture split: thin shim + Python core ✅ DONE (2026-11-13)
 
-The shell implementation has hit its ceiling: ad-hoc parsing, string-built
+Shipped: `aisha.sh` reduced to a ~200-line shim ($? capture, fc history dump,
+inject.txt buffer injection, ZLE/completion, installer); `aisha_core.py`
+(stdlib-only Python) now owns flags, context, llm calls, rendering, risk
+engine, state, confirm-and-run, and the agent loop. Hardening landed with the
+port: \b-anchored risky patterns catch separators (`;rm`, `|sh`, `&&sudo`)
+plus new patterns (git push --force, chmod 777, curl|sh, /dev/sd writes) with
+`AISHA_RISKY_EXTRA`/`AISHA_RISKY_ALLOW` config; multi-line suggestions via
+fenced-block extraction; agent gets real JSON checkpoints, byte-budgeted
+history, enforced tool gating, cwd-tracking + restore on resume, stdlib
+web_fetch with byte cap; markdown renderer is one pass in Python. Model
+defaults re-tiered for Apple Silicon (48 GB: qwen3.6:35b-mlx task /
+gemma4:31b-mlx thinking; 16 GB: gemma4:e4b-mlx task / qwen3.5:9b-mlx
+thinking — see README). Test suite: 34.
+
+Original rationale and the single-file-install discussion follow.
+
+The shell implementation had hit its ceiling: ad-hoc parsing, string-built
 JSON, sed pipelines per rendered line, and quoting hazards in every `eval`.
 The target architecture:
 
@@ -289,4 +305,7 @@ the repo — adds a network dependency. Decide once the core stabilizes;
 
 ## Next up
 
-Phase 3: the shim + Python core split described above.
+Phase 5 remnants: installer upgrades/--uninstall, ZLE widget wrapping, and a
+decision on the single-file install options above. Candidate new items: agent
+test coverage in bats (the port made the agent testable via the llm stub),
+and a `--json` output mode for scripting.

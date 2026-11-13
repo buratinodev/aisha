@@ -2,9 +2,11 @@
 
 all: check test
 
-# Lint (policy in .shellcheckrc)
+# Lint: shellcheck for the shim (policy in .shellcheckrc), compile check for
+# the Python core
 check:
 	shellcheck aisha.sh
+	python3 -m py_compile aisha_core.py
 
 # Run the bats suite (llm CLI is stubbed in tests/stubs)
 test:

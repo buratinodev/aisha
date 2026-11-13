@@ -1,6 +1,6 @@
 # aisha - AI(-powered) Shell Assistant
 
-A bash/zsh shell function that wraps LLM (via `llm` CLI) to provide intelligent command suggestions with safety checks and context awareness.
+An AI shell assistant with command suggestions, safety checks, and context awareness. A thin sourced shell shim (`aisha.sh`) owns the shell-integration surface — capturing exit codes and history, injecting suggestions into your editable input line — while a Python core (`aisha_core.py`) does everything else via the `llm` CLI.
 
 ## Purpose
 
@@ -80,9 +80,10 @@ Perfect for:
 
 If you prefer to install manually or need to customize the installation:
 
-1. Copy the script to your home directory:
+1. Copy the shim and the core to your home directory:
    ```bash
    cp aisha.sh ~/.aisha
+   cp aisha_core.py ~/.aisha-core.py
    ```
 
 2. Add to your shell configuration file (`~/.bashrc` or `~/.zshrc`):
@@ -107,14 +108,38 @@ You need the `llm` CLI tool with a configured model:
    pip install llm
    ```
 
-2. Install the Ollama plugin and pull the models:
+2. Install the Ollama plugin and pull models sized for your machine:
    ```bash
    llm install llm-ollama
-   ollama pull qwen3-coder:30b   # Task model (command suggestions)
-   ollama pull qwen3:32b          # Thinking model (deep analysis)
    ```
 
-   Or use different models by exporting `AISHA_MODEL_TASK` and `AISHA_MODEL_THINKING` in your shell rc file before the aisha loader.
+   **48 GB MacBook Pro (M-series) — the defaults:**
+   ```bash
+   ollama pull qwen3.6:35b-mlx   # Task model (23 GB) — agentic coding + command suggestions
+   ollama pull gemma4:31b-mlx    # Thinking model (19 GB) — deep analysis & explanations
+   ```
+
+   **16 GB MacBook:**
+   ```bash
+   ollama pull gemma4:e4b-mlx    # Task model (~9.5 GB) — 4B-effective edge model, fast & light to run
+   ollama pull qwen3.5:9b-mlx    # Thinking model (~7 GB) — supports thinking, strong at code
+   ```
+   then in `~/.config/aisha/config`:
+   ```bash
+   AISHA_MODEL_TASK="gemma4:e4b-mlx"
+   AISHA_MODEL_THINKING="qwen3.5:9b-mlx"
+   ```
+   `e4b` is built for edge deployment: only ~4B parameters are active per
+   token, so suggestions come back fast and cool. `gemma4:12b-mlx` (7.7 GB —
+   smaller download, but dense 12B compute) is the "max quality in budget"
+   alternative if you prefer smarter over snappier. On a 16 GB machine Ollama
+   will swap between the two models on demand; if that gets annoying, set
+   both roles to `qwen3.5:9b-mlx` and live in one model.
+
+   On Apple Silicon, always prefer the `-mlx` tags — they run on the MLX
+   backend and are meaningfully faster than the default GGUF builds. Any
+   other models work too: set `AISHA_MODEL_TASK` and `AISHA_MODEL_THINKING`
+   in the config file or environment.
 
 ## Usage
 
@@ -421,6 +446,26 @@ When running in zsh, aisha enables two additional quality-of-life features:
 
 These features are invisible in normal use — just type naturally.
 
+## Architecture
+
+Two files:
+
+- **`aisha.sh`** — a thin sourced shim (~200 lines). It owns only what a
+  child process cannot do: capture `$?` at `ai()` entry, dump shell history
+  (`fc`), inject the suggested command into your input buffer (`print -z` in
+  zsh, `history -s` in bash), and register the ZLE widget and tab completion.
+- **`aisha_core.py`** — the Python core (stdlib only). Flag parsing, context
+  assembly, llm calls, markdown rendering, the risk engine, state management,
+  confirm-and-run, and the agent loop (with real JSON checkpoints).
+
+The two communicate through the session state directory: the shim writes
+`history.txt` before invoking the core; the core writes `inject.txt` when a
+command should land in your input buffer.
+
+The safety model is honest heuristics, not a sandbox: risky-pattern matching
+catches common destructive commands (including behind `;`, `|`, `&&`), but
+you reviewing the command in your input line is the real safety layer.
+
 ## How It Works
 
 1. Detects your OS at startup (e.g., `Darwin/arm64 macOS 15.3`)
@@ -486,8 +531,8 @@ works too (the config file takes precedence).
 
 ### Change the LLM Models
 ```bash
-AISHA_MODEL_TASK="qwen3-coder:30b"       # Fast model for command suggestions & agent steps
-AISHA_MODEL_THINKING="qwen3:32b"         # Reasoning model for deep analysis & explanations
+AISHA_MODEL_TASK="qwen3.6:35b-mlx"      # Fast model for command suggestions & agent steps
+AISHA_MODEL_THINKING="gemma4:31b-mlx"   # Reasoning model for deep analysis & explanations
 ```
 
 | Feature | Model Used |
@@ -538,10 +583,10 @@ Add new persona modes by extending the persona flag logic around line 52.
 ## Requirements
 
 - bash or zsh shell
+- `python3` (3.8+) — runs the aisha core
 - `llm` CLI tool with `llm-ollama` plugin
-- Two LLM models via Ollama (defaults: `qwen3-coder:30b` for tasks, `qwen3:32b` for thinking)
-- Basic Unix tools: `grep`, `tee`, `mkdir`, `cat`, `sed`
-- `python3` (used for JSON escaping in agent checkpoints)
+- LLM models via Ollama — defaults assume ~48 GB RAM (`qwen3.6:35b-mlx` for
+  tasks, `gemma4:31b-mlx` for thinking); see Prerequisites for a 16 GB tier
 
 ## Development
 
