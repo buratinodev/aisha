@@ -517,7 +517,9 @@ PY
   [ "$status" -eq 0 ]
   [[ "$output" == *"planned-step"* ]]
   [[ "$output" == *"Done"* ]]
-  [ "$(grep -c 'plan.txt' "$AISHA_TEST_LLM_LOG")" -ge 2 ]
+  [ "$(grep -c 'APPROVED PLAN' "$AISHA_TEST_LLM_LOG")" -ge 2 ]
+  [[ "$output" == *"step 1/1"* ]]
+  ! grep -q -- "-f [^ ]*goal.txt" "$AISHA_TEST_LLM_LOG"
 }
 
 @test "agent output box wraps long lines inside the border" {

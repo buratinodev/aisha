@@ -395,6 +395,19 @@ end in FAILED. The first real plan included `docker system prune -a`
 goal" rule fixed it. `docker rm/rmi/prune` are now risky, `docker
 stop/kill/restart` sensitive. Test suite: 65.
 
+**0.6.4 / 0.6.5 — agent output and plan tracking:** long output lines now
+wrap inside the output box at terminal width (ANSI-aware). A real run of
+the 4-step container plan succeeded through step 4, then the model called
+`read_file(goal.txt)` — the prompt said "the goal is in the attached
+goal.txt", which reads like a file on disk — and wandered (ls, README)
+until FAILED. Fixes: goal, approved plan, and previous steps are inlined in
+the prompt (no internal files attached); the prompt states attachments are
+not on disk, and to reply DONE once the last plan step succeeds; progress
+shows `step k/N` against the plan (max steps stays a safety cap). Also
+found while verifying: the `llm` subprocess inherited aisha's stdin and
+consumed the user's piped reply (plan approval); llm now always gets
+`stdin=DEVNULL`. Test suite: 66.
+
 ---
 
 ## Decisions log

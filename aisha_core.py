@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -508,7 +508,8 @@ def _run_llm(mode, files, prompt, runner):
 
 def llm_capture(mode, files, prompt):
     def runner(args):
-        r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        r = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True)
         return r.returncode, r.stderr, bool(r.stdout), r.stdout
     try:
         return _run_llm(mode, files, prompt, runner)
@@ -522,8 +523,9 @@ def llm_stream_render(mode, files, prompt):
     env = dict(os.environ, PYTHONUNBUFFERED="1")
 
     def runner(args):
-        p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             text=True, env=env)
+        # stdin=DEVNULL: llm reads piped stdin as prompt text, which would eat user replies
+        p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, env=env)
         rend = MarkdownRenderer()
         captured = []
         assert p.stdout is not None and p.stderr is not None
@@ -1225,6 +1227,7 @@ class Agent:
         self.max_steps = int(cfg("AISHA_AGENT_MAX_STEPS") or 15)
         self.allowed_tools = {t.strip() for t in cfg("AISHA_AGENT_TOOLS").split(",") if t.strip()}
         self.cwd = os.getcwd()
+        self.plan = []
 
     # ---- checkpoints ----
     def save_checkpoint(self, step, action, output, status):
@@ -1284,11 +1287,15 @@ class Agent:
         out("")
 
     def step_header(self, iteration, label, action):
-        pct = iteration * 100 // self.max_steps
+        # With a plan, progress is measured against the plan; max_steps is only a safety cap
+        n = len(self.plan) or self.max_steps
+        pct = min(100, iteration * 100 // n)
+        pos = (f"step {iteration}/{n}" if iteration <= n
+               else f"step {iteration} (plan had {n})")
         filled = pct // 5
         bar = "█" * filled + "░" * (20 - filled)
         out(f"{DIM}──────────────────────────────────────────────────────────{RESET}")
-        out(f"{CYAN}  {label}{RESET} {DIM}step {iteration}/{self.max_steps}{RESET}  "
+        out(f"{CYAN}  {label}{RESET} {DIM}{pos}{RESET}  "
             f"{DIM}[{bar}]{RESET} {DIM}{pct}%{RESET}")
         out(f"  {YELLOW}❯ {action}{RESET}")
 
@@ -1380,7 +1387,9 @@ class Agent:
     # ---- prompts ----
     def plan_prompt(self):
         return f"""You are an autonomous shell agent. The user's OS is: {os_info()}
-The goal is in the attached goal.txt.
+
+GOAL: {self.goal}
+
 {HISTORY_NOTE}
 
 Write a short plan to achieve the goal: a numbered list of at most 8 steps, one line each.
@@ -1400,6 +1409,7 @@ Output ONLY the numbered list — no preamble, no code fences."""
             err("  The model returned no plan — aborting.")
             return False
         write_text(os.path.join(self.dir, "plan.txt"), "\n".join(steps) + "\n")
+        self.plan = steps
         out(f"  {CYAN}📋 Plan{RESET}")
         for s in steps:
             # Don't rely on the model's own [changes] tags
@@ -1423,19 +1433,28 @@ Output ONLY the numbered list — no preamble, no code fences."""
         return True
 
     def step_prompt(self, step, total):
+        if self.plan:
+            plan = ("APPROVED PLAN (follow it in order):\n" + "\n".join(self.plan) + "\n"
+                    "Adapt to what you observe, but never take a [changes] action the plan does\n"
+                    "not cover — if one is needed, reply FAILED and explain so the user can re-plan.\n"
+                    "When the last plan step has succeeded, reply DONE — do not keep exploring.\n")
+        else:
+            plan = ""
+        previous = self.history_context() or "(none yet)"
         return f"""You are an autonomous shell agent working toward a goal.
 The user's OS is: {os_info()}
 
-The goal is in the attached goal.txt.
+GOAL: {self.goal}
 
-STEP: {step} of {self.max_steps} (total: {total})
+{plan}
+YOUR PREVIOUS STEPS AND THEIR OUTPUT:
+{previous}
 
-The attached history_context.txt contains your previous steps.
-If plan.txt is attached, it is the plan the user approved: follow it in order. Adapt to what
-you observe, but never take a [changes] action that the plan does not cover — if one is
-needed, reply FAILED and explain, so the user can re-plan.
+This is action {total}. The attached history.txt, pwd.txt and git.txt are context passed to you,
+not files on disk — never try to read them with tools.
 {HISTORY_NOTE} To see that output, re-run that command first if it is
 read-only (e.g. `docker ps -a`, `ls`, `git status`) — never re-run one that changes things.
+As soon as the goal is achieved, reply DONE.
 
 AVAILABLE TOOLS:
 - COMMAND: <shell command>         — Execute a shell command
@@ -1480,6 +1499,7 @@ Rules:
                 return 1
             self.goal = read_file(os.path.join(self.dir, "goal.txt")).strip()
             self.mode = read_file(os.path.join(self.dir, "mode.txt")).strip() or "auto"
+            self.plan = read_file(os.path.join(self.dir, "plan.txt")).splitlines()
             out(f"{CYAN}🔄 Resuming agent session...{RESET}")
             cps = self.checkpoints()
             start = cps[-1]["step"] if cps else 0
@@ -1501,7 +1521,6 @@ Rules:
             os.path.join(CTX, "history.txt"),
             os.path.join(CTX, "pwd.txt"),
             os.path.join(CTX, "git.txt"),
-            os.path.join(self.dir, "goal.txt"),
         ]
         if not resume and cfg("AISHA_AGENT_PLAN") == "1" and not self.approve_plan(base_files):
             return 1
@@ -1512,13 +1531,8 @@ Rules:
                 iteration += 1
                 total += 1
 
-                write_text(os.path.join(self.dir, "history_context.txt"),
-                           self.history_context())
                 thinking_start()
-                raw = llm_capture("agent", base_files + [
-                    os.path.join(self.dir, "plan.txt"),
-                    os.path.join(self.dir, "history_context.txt"),
-                ], self.step_prompt(iteration, total))
+                raw = llm_capture("agent", base_files, self.step_prompt(iteration, total))
                 thinking_end()
                 resp = strip_response(raw)
 
@@ -1527,7 +1541,7 @@ Rules:
                     self.save_checkpoint(iteration, "DONE", summary, "done")
                     out(f"{DIM}──────────────────────────────────────────────────────────{RESET}")
                     out("")
-                    out(f"  {GREEN}✅ Done!{RESET} {DIM}Completed in {total} step(s){RESET}")
+                    out(f"  {GREEN}✅ Done!{RESET} {DIM}Completed in {total - 1} step(s){RESET}")
                     out(f"  {WHITE}{summary}{RESET}")
                     out("")
                     out(f"  {DIM}📋 Log: {self.dir}/agent_log.txt{RESET}")
