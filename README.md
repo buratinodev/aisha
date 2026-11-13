@@ -169,6 +169,11 @@ You need the `llm` CLI tool with a configured model:
    other models work too: set `AISHA_MODEL_TASK` and `AISHA_MODEL_THINKING`
    in the config file or environment.
 
+   > **Why not Apple's on-device model (`fm` CLI)?** Considered and
+   > rejected: its 4K shared context and Apple's own warning against code
+   > generation make it unfit for command suggestions — see the decisions
+   > log in `IMPLEMENTATION_PLAN.md`.
+
 ## Usage
 
 ### Basic Command Suggestions
@@ -252,6 +257,14 @@ vim $(ai -n which file defines the ai function in this repo)
 
 Piping `ai`'s output does the same automatically: `ai find big files | pbcopy`
 gets just the command.
+
+For structured scripting, `ai --json <request>` emits one JSON object —
+`{"type": "command", "command": "...", "risky": false, "model": "..."}` for
+tasks, `{"type": "answer", ...}` for questions:
+
+```bash
+ai --json delete old logs | jq -r 'select(.risky | not).command'
+```
 
 ### Help and Tips
 

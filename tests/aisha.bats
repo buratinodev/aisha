@@ -14,6 +14,8 @@ setup() {
   export AISHA_TEST_LLM_LOG="$TEST_TMP/llm.log"
   export AISHA_MODEL_TASK="task-model"
   export AISHA_MODEL_THINKING="think-model"
+  # Without this, prompts after consumed stdin block on the developer's terminal.
+  export AISHA_TTY=/dev/null
 
   # Run outside any git repo so git-status context is the "no repo" case
   cd "$TEST_TMP"
@@ -311,6 +313,92 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"doing great, thanks"* ]]
   [[ "$output" != *"Execute this command"* ]]
+}
+
+# ---- agent mode ---------------------------------------------------------------
+
+@test "agent executes a multi-step plan with tools and JSON checkpoints" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf 'COMMAND: echo step-one\n===\nTOOL:write_file(note.txt, hello agent)\n===\nDONE: created the note' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --agent make a note < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"step-one"* ]]
+  [[ "$output" == *"OK: Wrote"* ]]
+  [[ "$output" == *"Done!"* ]]
+  [ "$(cat "$TEST_TMP/note.txt")" = "hello agent" ]
+  python3 - "$XDG_STATE_HOME/aisha/latest/agent/checkpoints/step_3.json" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1]))
+assert meta["status"] == "done", meta
+PY
+}
+
+@test "agent risky step requires YES and pauses on EOF" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf 'COMMAND: rm -r junkdir' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --agent clean up junk < /dev/null'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Risky command"* ]]
+  [[ "$output" == *"Agent paused"* ]]
+}
+
+@test "agent tool gating blocks tools outside AISHA_AGENT_TOOLS" {
+  export AISHA_AGENT_TOOLS="command"
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf 'TOOL:read_file(secrets.txt)\n===\nDONE: gave up' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --agent read the secrets < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not allowed"* ]]
+}
+
+@test "agent --resume continues a paused session" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  run bash -c '
+    source "$AISHA_SH"
+    printf "COMMAND: sudo reboot" > "$AISHA_TEST_LLM_QUEUE"
+    ai --agent do something risky < /dev/null
+    printf "DONE: finished after resume" > "$AISHA_TEST_LLM_QUEUE"
+    ai --agent --resume < /dev/null
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Agent paused"* ]]
+  [[ "$output" == *"Resuming agent session"* ]]
+  [[ "$output" == *"finished after resume"* ]]
+}
+
+# ---- --json mode ----------------------------------------------------------------
+
+@test "--json emits a machine-readable command object" {
+  export AISHA_TEST_LLM_RESPONSE="ls -la"
+  run bash -c 'source "$AISHA_SH"; ai --json list files < /dev/null'
+  [ "$status" -eq 0 ]
+  python3 - <<PY
+import json
+d = json.loads('''$output''')
+assert d["type"] == "command" and d["command"] == "ls -la" and d["risky"] is False, d
+PY
+}
+
+@test "--json marks risky commands" {
+  export AISHA_TEST_LLM_RESPONSE="rm -r /tmp/junk"
+  run bash -c 'source "$AISHA_SH"; ai --json delete the junk < /dev/null'
+  [ "$status" -eq 0 ]
+  python3 - <<PY
+import json
+d = json.loads('''$output''')
+assert d["type"] == "command" and d["risky"] is True, d
+PY
+}
+
+@test "--json answers questions with an answer object" {
+  export AISHA_TEST_LLM_RESPONSE="cron is a scheduler"
+  run bash -c 'source "$AISHA_SH"; ai --json what is cron < /dev/null'
+  [ "$status" -eq 0 ]
+  python3 - <<PY
+import json
+d = json.loads('''$output''')
+assert d["type"] == "answer" and "scheduler" in d["answer"], d
+PY
 }
 
 # ---- installer ----------------------------------------------------------------

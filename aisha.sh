@@ -149,23 +149,40 @@ ai() {
 # Shell integration  (zsh ZLE + completion, bash completion)
 # ============================================================================
 
-_AISHA_COMPLETIONS="redo rerun explain /help /tips --deep --agent --agent-safe -n --no-exec -c --refine --help --version --install --uninstall"
+_AISHA_COMPLETIONS="redo rerun explain /help /tips --deep --agent --agent-safe -n --no-exec -c --refine --json --help --version --install --uninstall"
 
 if [[ -n "$ZSH_VERSION" ]]; then
   # Pass unmatched globs (?, *) literally instead of erroring
   setopt nonomatch
 
-  # ZLE widget: transparently replace ' with Unicode ʼ (U+02BC) in ai commands.
-  # Visually identical, avoids shell quote-parsing issues. History stays clean.
+  # ZLE widget: replace contraction apostrophes (whatʼs, U+02BC — visually
+  # identical) in ai commands so quote parsing isn't broken. Only apostrophes
+  # between letters are touched, so quoted args like 'find x' are left alone.
+  # Wraps any previously-installed accept-line widget instead of replacing
+  # it, so plugins like zsh-autosuggestions keep working.
   _ai_accept_line() {
     if [[ "$BUFFER" =~ ^ai[[:space:]] && "$BUFFER" == *"'"* ]]; then
-      BUFFER="${BUFFER//\'/ʼ}"
+      setopt localoptions extendedglob
+      # shellcheck disable=SC2154  # match is set by zsh (#b) backrefs
+      BUFFER="${BUFFER//(#b)([a-zA-Z])\'([a-zA-Z])/${match[1]}ʼ${match[2]}}"
       # shellcheck disable=SC2034  # CURSOR is read by zle
       CURSOR=${#BUFFER}
     fi
-    zle .accept-line
+    zle "$_AISHA_ORIG_ACCEPT_LINE" -- "$@"
   }
-  zle -N accept-line _ai_accept_line
+  # shellcheck disable=SC2154  # widgets is zsh's widget registry
+  case "${widgets[accept-line]:-builtin}" in
+    user:_ai_accept_line) ;;  # already installed (re-sourced)
+    user:*)
+      zle -N _ai_orig_accept_line "${widgets[accept-line]#user:}"
+      _AISHA_ORIG_ACCEPT_LINE="_ai_orig_accept_line"
+      zle -N accept-line _ai_accept_line
+      ;;
+    *)
+      _AISHA_ORIG_ACCEPT_LINE=".accept-line"
+      zle -N accept-line _ai_accept_line
+      ;;
+  esac
 
   # Completion: subcommands and flags in the first position only, so natural
   # language prompts are left alone (requires compinit to be loaded).

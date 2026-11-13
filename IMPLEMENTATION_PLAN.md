@@ -1,6 +1,6 @@
 # aisha — Improvement Investigation & Implementation Plan
 
-Status: in progress — **Phases 1–3 complete (2026-11-13)** · Scope: `aisha.sh`, `aisha_core.py`, README
+Status: **all phases complete (2026-11-13)** · Scope: `aisha.sh`, `aisha_core.py`, README
 
 This document captures a code-level audit of aisha and a phased plan to fix the
 weaknesses and close the gap to what a power user expects from a shell AI
@@ -294,9 +294,11 @@ the repo — adds a network dependency. Decide once the core stabilizes;
 
 1. ~~Streaming render~~ → moved to Phase 2, item 7 (user-requested).
 2. ~~zsh/bash completion~~ → moved to Phase 2, item 8 (user-requested).
-3. Rework the zsh apostrophe widget to wrap (not replace) the existing
-   `accept-line` widget, or retire it in favor of the Ask fallback
-   (finding #10).
+3. ~~Rework the zsh apostrophe widget~~ → shipped (2026-11-13): the widget
+   now wraps any previously-installed `accept-line` widget (saved and
+   chained, so zsh-autosuggestions and friends keep working) and only
+   rewrites contraction apostrophes between letters — quoted args like
+   `'find x'` are left intact (finding #10).
 4. ~~`ai rerun`~~ → shipped early with the Phase 2 follow-ups (finding #12).
 5. ~~Installer~~ → shipped (2026-11-13): installer moved into the Python core
    (shim only bootstraps it when executed); `--install` is version-aware and
@@ -312,8 +314,29 @@ the repo — adds a network dependency. Decide once the core stabilizes;
 
 ---
 
+## Decisions log
+
+**Apple on-device Foundation Model (`fm` CLI) — considered, rejected
+(2026-11-13).** macOS ships an `fm` command (Apple Silicon, ~3B params) that
+looked attractive as an ollama alternative: zero download, always resident,
+no server, battery-friendly. Rejected as an aisha backend because it is unfit
+for the core workloads: a 4,096-token context window shared across
+instructions/prompt/response (our context attachments alone can exceed it),
+and Apple's own guidance warns against code generation and notes it
+"frequently hallucinates procedural steps" and is "poor at troubleshooting
+terminal errors" — which are exactly aisha's task model, auto-fix, and agent
+jobs. A fast wrong command is worse than a slow right one. For a light-RAM
+setup, `qwen3.5:4b-mlx` (~3.5 GB) via ollama is the better option and keeps
+the single `llm` seam. Revisit if an `llm` plugin for Apple Foundation Models
+appears (that would make it a zero-code config choice) or Apple ships a
+code-capable tier; a narrow `ai /summarize` lane over piped text would be the
+one defensible use (summarization is fm's strength).
+
 ## Next up
 
-Phase 5 remnants: ZLE widget wrapping (finding #10). Candidate new items:
-agent test coverage in bats (the port made the agent testable via the llm
-stub), and a `--json` output mode for scripting.
+All planned phases and findings are addressed (2026-11-13): agent bats
+coverage landed (multi-step plans, risky gating, tool gating, resume — via a
+response queue in the llm stub) and `ai --json` shipped for scripting.
+Remaining ideas are nice-to-haves: an end-to-end pass against the real
+models, and the `ai /summarize` lane from the fm decision above if on-device
+summarization ever becomes interesting.

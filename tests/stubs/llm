@@ -1,8 +1,25 @@
 #!/usr/bin/env bash
 # Test stub for the `llm` CLI.
-# Records its argv to $AISHA_TEST_LLM_LOG (if set) and prints the canned
-# response from $AISHA_TEST_LLM_RESPONSE.
+# - Records its argv to $AISHA_TEST_LLM_LOG (if set)
+# - If $AISHA_TEST_LLM_QUEUE points to a non-empty file, pops and prints the
+#   first chunk (chunks separated by a line containing only ===) — lets tests
+#   script multi-step agent conversations
+# - Otherwise prints $AISHA_TEST_LLM_RESPONSE
 if [[ -n "$AISHA_TEST_LLM_LOG" ]]; then
   printf 'ARGS: %s\n' "$*" >> "$AISHA_TEST_LLM_LOG"
 fi
+
+if [[ -n "$AISHA_TEST_LLM_QUEUE" && -s "$AISHA_TEST_LLM_QUEUE" ]]; then
+  python3 - "$AISHA_TEST_LLM_QUEUE" <<'EOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    chunks = f.read().split("\n===\n")
+print(chunks[0])
+with open(path, "w") as f:
+    f.write("\n===\n".join(chunks[1:]))
+EOF
+  exit 0
+fi
+
 printf '%s\n' "${AISHA_TEST_LLM_RESPONSE:-echo stub-response}"

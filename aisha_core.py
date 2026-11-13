@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -311,6 +311,11 @@ def render_markdown(text):
 # ============================================================================
 # LLM invocation
 # ============================================================================
+# All model access goes through the `llm` CLI — one seam, plugin-extensible.
+# (Apple's on-device `fm` CLI was considered as a second backend and
+# rejected: 4K shared context and Apple's own no-code-generation guidance
+# make it unfit for command suggestions; see IMPLEMENTATION_PLAN.md.)
+
 
 def llm_args(model, files, prompt):
     args = ["llm", "-m", model]
@@ -381,7 +386,8 @@ def read_reply():
     reply could be read at all (EOF / no tty): callers take the safe path."""
     if STDIN_CONSUMED:
         try:
-            with open("/dev/tty", encoding="utf-8") as t:
+            # AISHA_TTY lets tests keep prompts off the real terminal.
+            with open(os.environ.get("AISHA_TTY", "/dev/tty"), encoding="utf-8") as t:
                 line = t.readline()
         except OSError:
             return "", False
@@ -666,6 +672,7 @@ def cmd_help():
 ### Flags
 - `--deep` — use the thinking model for thorough analysis
 - `-n, --no-exec` — print the suggested command only (for scripts and pipes)
+- `--json` — machine-readable output: {{"type","command","risky","model"}}
 - `-c, --refine <feedback>` — revise the last suggestion ("use ripgrep instead")
 - `--agent <goal>` — autonomous multi-step mode (`--agent --resume` to continue)
 - `--agent-safe <goal>` — agent mode, confirm every step
@@ -1380,12 +1387,15 @@ def main(argv):
     persona = "sysadmin"
     no_exec = False
     refine = False
+    json_mode = False
     while argv:
         a = argv[0]
         if a == "--deep":
             persona = "deep"
         elif a in ("-n", "--no-exec"):
             no_exec = True
+        elif a == "--json":
+            json_mode = True
         elif a in ("-c", "--refine"):
             refine = True
         elif a in ("-h", "--help", "/help"):
@@ -1438,6 +1448,10 @@ def main(argv):
     if prompt:
         write_text(spath("last_prompt.txt"), prompt + "\n")
 
+    if json_mode and not prompt:
+        print(json.dumps({"type": "error", "error": "--json requires a prompt"}))
+        return 1
+
     capture_context(LAST_EXIT)
 
     # ---- piped input with no prompt → diagnose the piped data ----
@@ -1471,13 +1485,18 @@ Summarize what it shows and diagnose any errors or anomalies.""")
 
     # ---- explanation mode (how/why/what/explain/help) ----
     if EXPLAIN_QUERY_RE.match(prompt):
-        llm_stream_render(model,
-                          ctx_files("history.txt", "pwd.txt", "git.txt")
-                          + [spath("last_prompt.txt")] + extra_files,
-                          f"""{system_prompt(persona)}
+        explain_prompt = f"""{system_prompt(persona)}
 
 Explain clearly and include one concrete command example to illustrate if applicable, but do NOT prompt the user to execute anything.
-The user's question is in the attached last_prompt.txt. If stdin.txt is attached, it is data the user piped in — treat it as the subject of the question.""")
+The user's question is in the attached last_prompt.txt. If stdin.txt is attached, it is data the user piped in — treat it as the subject of the question."""
+        explain_files = (ctx_files("history.txt", "pwd.txt", "git.txt")
+                         + [spath("last_prompt.txt")] + extra_files)
+        if json_mode:
+            raw = llm_capture(model, explain_files, explain_prompt)
+            answer = re.sub(r'<think>.*?</think>', '', raw, flags=re.S).strip()
+            print(json.dumps({"type": "answer", "answer": answer, "model": model}))
+            return 0
+        llm_stream_render(model, explain_files, explain_prompt)
         return 0
 
     # ---- command suggestion mode ----
@@ -1500,6 +1519,20 @@ Rules:
     thinking_end()
 
     response = strip_response(raw)
+
+    if json_mode:
+        if not response:
+            print(json.dumps({"type": "error", "error": "no response from model"}))
+            return 1
+        if response.startswith("ANSWER:"):
+            print(json.dumps({"type": "answer", "answer": response[7:].strip(),
+                              "model": model}))
+            return 0
+        write_text(spath("last_command.txt"), response + "\n")
+        print(json.dumps({"type": "command", "command": response,
+                          "risky": is_risky(response), "model": model}))
+        return 0
+
     if not response:
         out("")
         print(f"{YELLOW}No response available.{RESET}")
