@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -1539,6 +1539,12 @@ Rules:
                 if resp.startswith("DONE:"):
                     summary = resp[5:].strip()
                     self.save_checkpoint(iteration, "DONE", summary, "done")
+                    # A finished run must not be resumable; the log stays for reference
+                    for name in ("goal.txt", "mode.txt", "plan.txt"):
+                        try:
+                            os.remove(os.path.join(self.dir, name))
+                        except OSError:
+                            pass
                     out(f"{DIM}──────────────────────────────────────────────────────────{RESET}")
                     out("")
                     out(f"  {GREEN}✅ Done!{RESET} {DIM}Completed in {total - 1} step(s){RESET}")

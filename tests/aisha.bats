@@ -532,6 +532,17 @@ PY
   ! grep -qE '^x' <<< "$output"
 }
 
+@test "a finished agent run cannot be resumed; its log is kept" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf 'COMMAND: echo hi\n===\nDONE: said hi' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --agent say hi < /dev/null; ai --agent --resume < /dev/null'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Done"* ]]
+  [[ "$output" == *"No agent session to resume"* ]]
+  [ ! -e "$XDG_STATE_HOME/aisha/latest/agent/goal.txt" ]
+  [ -s "$XDG_STATE_HOME/aisha/latest/agent/agent_log.txt" ]
+}
+
 @test "agent sees shell history and is told how to resolve 'the above'" {
   export AISHA_TEST_LLM_RESPONSE="DONE: nothing to do"
   run bash -c 'source "$AISHA_SH"; ai --agent clean the above containers < /dev/null'
