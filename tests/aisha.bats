@@ -543,6 +543,16 @@ PY
   [ -s "$XDG_STATE_HOME/aisha/latest/agent/agent_log.txt" ]
 }
 
+@test "agent refuses interactive programs instead of hanging; batch forms run" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt"
+  printf 'COMMAND: top\n===\nCOMMAND: ps aux | less\n===\nCOMMAND: echo batch-ok\n===\nDONE: checked' > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --agent check cpu < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'interactive program refused' <<< "$output")" -eq 2 ]
+  [[ "$output" == *"batch-ok"* ]]
+  grep -q "WITHOUT a terminal" "$AISHA_TEST_LLM_LOG"
+}
+
 @test "agent sees shell history and is told how to resolve 'the above'" {
   export AISHA_TEST_LLM_RESPONSE="DONE: nothing to do"
   run bash -c 'source "$AISHA_SH"; ai --agent clean the above containers < /dev/null'

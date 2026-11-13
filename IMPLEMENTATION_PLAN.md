@@ -408,6 +408,13 @@ found while verifying: the `llm` subprocess inherited aisha's stdin and
 consumed the user's piped reply (plan approval); llm now always gets
 `stdin=DEVNULL`. Test suite: 66.
 
+**0.6.8 — non-interactive agent steps:** a real plan ran `top`, which waited
+on the user's terminal until the 120 s timeout. Agent steps now get
+`stdin=DEVNULL`, interactive programs (top, htop, less, vim, watch, bare
+python/ssh, …) are refused with a hint at the batch form (`top -l 1 -o cpu
+-n 10`), and the plan/step prompts state that commands run without a
+terminal (sudo can't prompt). README gained a screenshot. Test suite: 68.
+
 ---
 
 ## Decisions log

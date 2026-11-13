@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.7"
+VERSION = "0.6.8"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -219,6 +219,12 @@ RISKY_PATTERNS = [
 
 INTERACTIVE_CMD_RE = re.compile(
     r'^(top|htop|btop|nmon|vim|vi|nvim|nano|less|more|man|watch|tmux|screen)( |$)')
+
+# Agent steps have no terminal: these programs would wait forever
+AGENT_INTERACTIVE_RE = re.compile(
+    r'(^|[;&|(]\s*)(sudo\s+)?(top|htop|btop|nmon|vim|vi|nvim|nano|emacs|less|more|man|'
+    r'watch|tmux|screen|ssh|ftp|python3?|node|irb|mysql|psql)(\s|$)')
+AGENT_BATCH_OK_RE = re.compile(r'\btop\s+.*(-l\s*\d|-b\b)|\b(python3?|node)\s+\S|\b(ssh)\s+\S+\s+\S')
 
 
 def is_risky(cmd):
@@ -610,6 +616,13 @@ HISTORY_NOTE = (
     "history.txt lists the user's recent shell commands, newest last; their OUTPUT is not "
     "available. When the request refers to earlier output ('the above', 'these', 'that error', "
     "'those containers'), it means the output of the most recent relevant command in history.txt.")
+
+
+AGENT_EXEC_NOTE = (
+    "Commands run WITHOUT a terminal and without input: never use interactive programs "
+    "(top, htop, less, vim, watch, a bare python/ssh); use batch forms such as "
+    "`top -l 1 -o cpu -n 10` (macOS) or `top -b -n 1` (Linux), `ps aux`, `cat`. "
+    "sudo cannot prompt for a password here — avoid it unless essential.")
 
 
 AISHA_SELF = (
@@ -1322,6 +1335,10 @@ class Agent:
     # ---- tools ----
     def run_step_command(self, cmd):
         """Run a shell command for one agent step, tracking cwd changes."""
+        if AGENT_INTERACTIVE_RE.search(cmd) and not AGENT_BATCH_OK_RE.search(cmd):
+            return ("ERROR: interactive program refused — agent steps run without a terminal. "
+                    "Use a batch form instead, e.g. `top -l 1 -o cpu -n 10` (macOS), "
+                    "`top -b -n 1` (Linux), `ps aux`, `cat` instead of less."), 1
         m = re.match(r'^\s*cd\s+(.+?)\s*$', cmd)
         if m:
             target = os.path.expanduser(m.group(1).strip("'\""))
@@ -1331,7 +1348,7 @@ class Agent:
                 return f"OK: now in {new}", 0
             return f"ERROR: no such directory: {target}", 1
         try:
-            r = subprocess.run(["bash", "-c", cmd], cwd=self.cwd,
+            r = subprocess.run(["bash", "-c", cmd], cwd=self.cwd, stdin=subprocess.DEVNULL,
                                capture_output=True, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             return "ERROR: command timed out after 120s", 1
@@ -1396,6 +1413,7 @@ Write a short plan to achieve the goal: a numbered list of at most 8 steps, one 
 Inspect before acting (read-only steps first). Append [changes] to every step that modifies
 files, processes, containers, packages, or remote systems. Name concrete commands where known.
 Stay strictly within the goal: no extra cleanup, pruning, or "while we're at it" steps.
+{AGENT_EXEC_NOTE}
 Output ONLY the numbered list — no preamble, no code fences."""
 
     def approve_plan(self, files):
@@ -1455,6 +1473,7 @@ not files on disk — never try to read them with tools.
 {HISTORY_NOTE} To see that output, re-run that command first if it is
 read-only (e.g. `docker ps -a`, `ls`, `git status`) — never re-run one that changes things.
 As soon as the goal is achieved, reply DONE.
+{AGENT_EXEC_NOTE}
 
 AVAILABLE TOOLS:
 - COMMAND: <shell command>         — Execute a shell command

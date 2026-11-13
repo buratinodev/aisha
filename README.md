@@ -2,6 +2,8 @@
 
 An AI shell assistant with command suggestions, safety checks, and context awareness. A thin sourced shell shim (`aisha.sh`) owns the shell-integration surface — capturing exit codes and history, injecting suggestions into your editable input line — while a Python core (`aisha_core.py`) does everything else via the `llm` CLI.
 
+![aisha answering a question with a suggested command, then planning an agent task](docs/screenshot.png)
+
 ## Purpose
 
 **aisha** transforms your shell into an intelligent assistant that:
