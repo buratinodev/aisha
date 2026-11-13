@@ -520,6 +520,16 @@ PY
   [ "$(grep -c 'plan.txt' "$AISHA_TEST_LLM_LOG")" -ge 2 ]
 }
 
+@test "agent output box wraps long lines inside the border" {
+  export AISHA_TEST_LLM_QUEUE="$TEST_TMP/queue.txt" COLUMNS=40
+  printf '%s\n===\n%s' "COMMAND: python3 -c \"print('x'*100)\"" "DONE: printed" > "$AISHA_TEST_LLM_QUEUE"
+  run bash -c 'source "$AISHA_SH"; ai --agent print a long line < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'xxxx' <<< "$output")" -eq 3 ]
+  [ "$(grep 'xxxx' <<< "$output" | grep -c '│')" -eq 3 ]
+  ! grep -qE '^x' <<< "$output"
+}
+
 @test "agent sees shell history and is told how to resolve 'the above'" {
   export AISHA_TEST_LLM_RESPONSE="DONE: nothing to do"
   run bash -c 'source "$AISHA_SH"; ai --agent clean the above containers < /dev/null'

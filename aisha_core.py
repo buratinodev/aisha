@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -404,6 +404,29 @@ def render_markdown(text):
     r = MarkdownRenderer()
     for line in text.splitlines():
         r.feed(line)
+
+
+_ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+
+
+def wrap_visible(line, width):
+    """Split line into chunks of at most `width` visible characters,
+    keeping ANSI escape sequences intact (they take no screen space)."""
+    chunks, cur, n, i = [], "", 0, 0
+    while i < len(line):
+        m = _ANSI.match(line, i)
+        if m:
+            cur += m.group(0)
+            i = m.end()
+            continue
+        if n == width:
+            chunks.append(cur + RESET if _ANSI.search(cur) else cur)
+            cur, n = "", 0
+        cur += line[i]
+        n += 1
+        i += 1
+    chunks.append(cur)
+    return chunks
 
 
 # ============================================================================
@@ -1270,15 +1293,18 @@ class Agent:
         out(f"  {YELLOW}❯ {action}{RESET}")
 
     def show_output(self, output, exit_code):
+        import shutil
+        width = max(20, shutil.get_terminal_size((100, 24)).columns - 4)
         lines = output.splitlines()
         out(f"{DIM}  ┌─ output ──────────────────────────────────────────────{RESET}")
         if lines:
             for line in lines[:10]:
-                out(f"  │ {line}")
+                for chunk in wrap_visible(line.expandtabs(), width):
+                    out(f"  {DIM}│{RESET} {chunk}")
             if len(lines) > 10:
-                out(f"  │ {DIM}... ({len(lines) - 10} more lines){RESET}")
+                out(f"  {DIM}│ ... ({len(lines) - 10} more lines){RESET}")
         else:
-            out(f"  │ {DIM}(no output){RESET}")
+            out(f"  {DIM}│ (no output){RESET}")
         out(f"{DIM}  └──────────────────────────────────────────────────────{RESET}")
         if exit_code != 0:
             out(f"  {RED}✗ exit code {exit_code}{RESET}")
