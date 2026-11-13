@@ -458,6 +458,42 @@ PY
   [[ "$output" != *"Execute this command"* ]]
 }
 
+@test "questions with a contraction (whatʼs, U+02BC from the zsh widget) use explanation mode" {
+  export AISHA_TEST_LLM_RESPONSE="pipx isolates apps"
+  run bash -c 'source "$AISHA_SH"; ai whatʼs this pipx stuff < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pipx isolates apps"* ]]
+  grep -q "COMMAND: <the command>" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "a question's COMMAND: line is hidden from the answer and delivered as the command" {
+  export AISHA_TEST_LLM_RESPONSE=$'pipx keeps each app in its own venv.\nCOMMAND: ls ~/.local/pipx/venvs'
+  run bash -c 'source "$AISHA_SH"; ai what is pipx < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"its own venv"* ]]
+  [[ "$output" != *"COMMAND:"* ]]
+  [ "$(cat "$XDG_STATE_HOME/aisha/latest/last_command.txt")" = "ls ~/.local/pipx/venvs" ]
+}
+
+@test "prose plus a fenced command: prose is shown, only the command is delivered" {
+  export AISHA_TEST_LLM_RESPONSE=$'This lists apps installed with pipx:\n```bash\npipx list\n```'
+  run bash -c 'source "$AISHA_SH"; ai --json list my pipx apps < /dev/null'
+  [ "$status" -eq 0 ]
+  python3 - <<PY
+import json
+d = json.loads('''$output''')
+assert d["command"] == "pipx list" and "lists apps" in d["explanation"], d
+PY
+}
+
+@test "prose returned in suggestion mode is shown as an answer, never delivered as a command" {
+  export AISHA_TEST_LLM_RESPONSE='`pipx` manages Python apps in isolated environments.'
+  run bash -c 'source "$AISHA_SH"; ai --json tell me about pipx < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"type": "answer"'* ]]
+  [ ! -f "$XDG_STATE_HOME/aisha/latest/last_command.txt" ]
+}
+
 # ---- agent mode ---------------------------------------------------------------
 
 @test "agent executes a multi-step plan with tools and JSON checkpoints" {

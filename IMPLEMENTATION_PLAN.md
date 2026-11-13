@@ -371,6 +371,17 @@ only surfaces llm's stderr when the call fails. Also fixed: re-sourcing
 original widget ("No such widget"); it now falls back to `.accept-line`.
 Test suite: 58.
 
+**0.6.2 — prose vs command:** `ai what's …` was routed as a command request
+because the zsh widget's U+02BC apostrophe (`whatʼs`) defeated the
+question regex, and the model's prose answer was injected into the input
+line. Fixes: the question regex accepts contractions; replies are split into
+prose and command (`split_response`: a fenced block is the command, text
+around it is the explanation; unfenced text whose first word isn't a
+builtin/path/executable on PATH is treated as prose and never injected);
+questions may end with a `COMMAND: <cmd>` line (like auto-fix's `FIX:`),
+hidden from the rendered answer and delivered to the input line. `--json`
+adds `explanation` / `command` fields accordingly. Test suite: 62.
+
 ---
 
 ## Decisions log

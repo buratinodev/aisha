@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -314,6 +314,30 @@ def strip_response(raw):
     return ""
 
 
+def split_response(raw):
+    """Split a suggestion reply into (prose, command). A fenced block is the
+    command and the text around it is prose; without a fence, the reply is
+    either a bare command or pure prose."""
+    raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.S)
+    raw = re.sub(r'<think>.*', '', raw, flags=re.S).strip()
+    m = re.search(r'```[a-zA-Z0-9_-]*\n?(.*?)```', raw, flags=re.S)
+    if m and m.group(1).strip():
+        return (raw[:m.start()] + raw[m.end():]).strip(), m.group(1).strip()
+    cmd = strip_response(raw)
+    if cmd and looks_like_command(cmd):
+        return "", cmd
+    return raw, ""
+
+
+def extract_marker(raw, marker):
+    """Value of the last '<marker> value' line (e.g. FIX:, COMMAND:), or ''."""
+    value = ""
+    for line in raw.splitlines():
+        if line.startswith(marker):
+            value = line[len(marker):].strip().strip("`")
+    return value
+
+
 _INLINE_CODE = re.compile(r'`([^`]*)`')
 _BOLD = re.compile(r'\*\*([^*]*)\*\*')
 
@@ -337,8 +361,8 @@ class MarkdownRenderer:
             if "</think>" in line:
                 self.in_think = False
             return
-        # Internal protocol marker (auto-fix corrected command) — not for display
-        if line.startswith("FIX:"):
+        # Internal protocol markers (commands delivered separately) — not for display
+        if line.startswith(("FIX:", "COMMAND:")):
             return
         if line.startswith("```"):
             if self.in_code:
@@ -1811,7 +1835,32 @@ def cmd_uninstall():
 # Main dispatch
 # ============================================================================
 
-EXPLAIN_QUERY_RE = re.compile(r'^(how|why|what|explain|help)(\s|$)')
+# The zsh widget turns what's into whatʼs (U+02BC), so accept any apostrophe
+EXPLAIN_QUERY_RE = re.compile(r"^(how|why|what|explain|help)(?=$|\s|['\u02bc\u2019])", re.I)
+
+SHELL_WORDS = {
+    "cd", "export", "source", ".", "alias", "unalias", "set", "unset", "eval",
+    "exec", "time", "for", "while", "until", "if", "case", "function", "[", "[[",
+    "{", "(", "!", "ai", "history", "fc", "jobs", "bg", "fg", "pushd", "popd",
+}
+
+
+def looks_like_command(text):
+    """True when the first word is runnable: a shell builtin/keyword, a path,
+    or an executable on PATH. Prose answers ("`pipx` manages...") are not."""
+    import shutil
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        words = line.split()
+    while words and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
+        words = words[1:]
+    if not words:
+        return False
+    first = words[0]
+    return (first in SHELL_WORDS or first.startswith(("/", "./", "~", "$", "("))
+            or shutil.which(first) is not None)
 
 
 def main(argv):
@@ -1959,16 +2008,29 @@ Summarize what it shows and diagnose any errors or anomalies.""")
         mode = "deep" if deep else "explain"
         explain_prompt = f"""{system_prompt(persona)}
 
-Explain clearly and include one concrete command example to illustrate if applicable, but do NOT prompt the user to execute anything.
+Explain clearly and concisely. If one shell command is directly useful as a next step for the user
+(to inspect or act on what you explained), END your reply with exactly one final line in this form
+(no code fences, nothing after it):
+COMMAND: <the command>
+Otherwise omit that line.
 The user's question is in the attached last_prompt.txt. If stdin.txt is attached, it is data the user piped in — treat it as the subject of the question."""
         explain_files = (ctx_files("history.txt", "pwd.txt", "git.txt")
                          + [spath("last_prompt.txt")] + extra_files)
         if json_mode:
             raw = llm_capture(mode, explain_files, explain_prompt)
-            answer = re.sub(r'<think>.*?</think>', '', raw, flags=re.S).strip()
-            print(json.dumps({"type": "answer", "answer": answer, "model": model}))
+            raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.S)
+            command = extract_marker(raw, "COMMAND:")
+            answer = "\n".join(ln for ln in raw.splitlines()
+                               if not ln.startswith("COMMAND:")).strip()
+            result = {"type": "answer", "answer": answer, "model": model}
+            if command:
+                result["command"] = command
+            print(json.dumps(result))
             return 0
-        llm_stream_render(mode, explain_files, explain_prompt)
+        raw = llm_stream_render(mode, explain_files, explain_prompt)
+        command = extract_marker(raw, "COMMAND:")
+        if command and looks_like_command(command):
+            return deliver_suggestion(command, no_exec)
         return 0
 
     # ---- command suggestion mode ----
@@ -1979,33 +2041,39 @@ The user's question is in the attached last_prompt.txt. If stdin.txt is attached
                       f"{system_prompt(persona)}\n\n{SUGGEST_RULES}")
     thinking_end()
 
-    response = strip_response(raw)
+    prose, response = split_response(raw)
+    if prose.startswith("ANSWER:"):
+        prose = prose[7:].strip()
 
     if json_mode:
-        if not response:
+        if not response and not prose:
             print(json.dumps({"type": "error", "error": "no response from model"}))
             return 1
-        if response.startswith("ANSWER:"):
-            print(json.dumps({"type": "answer", "answer": response[7:].strip(),
-                              "model": model}))
+        if not response:
+            print(json.dumps({"type": "answer", "answer": prose, "model": model}))
             return 0
         write_text(spath("last_command.txt"), response + "\n")
         response, review = apply_review(response)
         result = {"type": "command", "command": response,
                   "risky": is_risky(response), "model": model}
+        if prose:
+            result["explanation"] = prose
         if review:
             result["review"] = review
         print(json.dumps(result))
         return 0
 
-    if not response:
+    if not response and not prose:
         out("")
         print(f"{YELLOW}No response available.{RESET}")
         return 0
 
-    if response.startswith("ANSWER:"):
+    if prose and not no_exec:
         out("")
-        print(f"{CYAN}{response[7:].strip()}{RESET}")
+        render_markdown(prose)
+    if not response:
+        if prose and no_exec:
+            sys.stderr.write(prose + "\n")
         return 0
 
     write_text(spath("last_persona.txt"), persona + "\n")
