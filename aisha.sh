@@ -168,7 +168,8 @@ if [[ -n "$ZSH_VERSION" ]]; then
       # shellcheck disable=SC2034  # CURSOR is read by zle
       CURSOR=${#BUFFER}
     fi
-    zle "$_AISHA_ORIG_ACCEPT_LINE" -- "$@"
+    # Unset when re-sourced over a pre-0.5 aisha that used the same widget name
+    zle "${_AISHA_ORIG_ACCEPT_LINE:-.accept-line}" -- "$@"
   }
   # shellcheck disable=SC2154  # widgets is zsh's widget registry
   case "${widgets[accept-line]:-builtin}" in
