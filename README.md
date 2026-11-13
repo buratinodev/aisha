@@ -30,6 +30,14 @@ Perfect for:
   - Detects complex destructive patterns (e.g., `find ... -exec rm`, `shred`, etc.)
 - **Memory**: Remembers last suggestion for quick redo/explain
 - **Auto-Fix**: Detects failed commands and suggests fixes
+- **Edit-before-run**: Suggestions land in your editable input line (zsh) or history (bash) — review, tweak, run; `AISHA_AUTORUN=1` restores the classic confirm prompt
+- **Pipe anything in**: `docker logs app 2>&1 | ai why is this crashing` — piped input becomes context
+- **Refinement**: `ai -c "use ripgrep instead"` revises the last suggestion
+- **Script-friendly**: `ai -n <request>` prints just the command — usable in `$( )`, pipes, `pbcopy`
+- **Streaming answers**: explanations render as they are generated
+- **Built-in help & tips**: `ai /help` and `ai /tips [topic]`
+- **Tab completion** for subcommands and flags (zsh and bash)
+- **Config file**: `~/.config/aisha/config` — no script editing needed
 - **Colorized Output**: Preserves colors in ls, grep, diff, and tree commands
 - **OS-Aware**: Auto-detects your operating system for platform-specific commands
 - **Agent Mode**: Autonomous multi-step task execution with tool use, checkpoints, and safety controls
@@ -116,12 +124,20 @@ Simply describe what you want to do in natural language:
 
 ```bash
 ai list all files
-# Suggests: ls -la
-# Prompt: Execute this command? [Y/n]:
+# Suggested command:
+#   ls -la
+#   ↳ placed in your input line — edit if needed, Enter to run
+```
 
-ai find large files over 100MB
-# Suggests: find . -type f -size +100M
-# Prompt: Execute this command? [Y/n]:
+By default the suggestion is injected into your shell's editable input line
+(zsh) or pushed to history so `↑` recalls it (bash). You review it, tweak it
+if needed, and run it yourself — and it lands in your shell history like any
+other command.
+
+Prefer the classic behavior where aisha prompts and runs the command for you?
+
+```bash
+export AISHA_AUTORUN=1   # restores: Execute this command? [Y/n]
 ```
 
 ### Conversational Queries
@@ -141,18 +157,75 @@ ai what is a symlink?
 > visually identical Unicode apostrophe (`ʼ` U+02BC) so shell parsing isn't broken.
 > If the shell still eats your arguments, aisha falls back to an interactive `Ask:` prompt.
 
+### Piping Input as Context
+
+Anything piped into `ai` is attached as context (capped at 64 KB):
+
+```bash
+docker logs app 2>&1 | ai why is this crashing
+# Analyzes the log and explains the crash
+
+kubectl describe pod web | ai                 # no question needed —
+# piped data with no prompt is summarized and diagnosed automatically
+
+dmesg | tail -50 | ai is this disk failing
+```
+
+Set `AISHA_STDIN_CONTEXT=0` to disable this behavior.
+
+### Refining a Suggestion
+
+Not quite what you wanted? Refine it instead of rephrasing from scratch:
+
+```bash
+ai find all TODO comments
+#   grep -rn "TODO" .
+
+ai -c use ripgrep and include FIXME too
+#   rg -n "TODO|FIXME"
+```
+
+Refinements chain — each `ai -c` sees the original request plus all previous
+feedback.
+
+### Script-Friendly Output
+
+`ai -n` (`--no-exec`) prints only the bare command — no colors, no prompts:
+
+```bash
+ai -n list open ports | pbcopy
+vim $(ai -n which file defines the ai function in this repo)
+```
+
+Piping `ai`'s output does the same automatically: `ai find big files | pbcopy`
+gets just the command.
+
+### Help and Tips
+
+```bash
+ai /help         # usage, flags, configuration reference
+ai /tips         # curated power-user one-liners (instant, no model call)
+ai /tips awk     # five model-generated one-liners about any topic
+ai --version
+```
+
 ### Risky Command Handling
 
-Destructive commands require typing "YES" (not just Y):
+Risky commands (sudo, rm, dd, kubectl delete, ...) always get a red warning
+under the suggestion:
 
 ```bash
 ai delete all .tmp files
-# Suggests: find . -name "*.tmp" -type f -exec rm {} +
-# ⚠️  Risky command detected.
-# Type YES to execute (Ctrl+C to abort):
+# Suggested command:
+#   find . -name "*.tmp" -type f -exec rm {} +
+#   ⚠️  Review carefully — this command can be destructive.
+```
 
-ai remove old docker containers
-# Suggests: docker container prune
+When aisha executes commands itself (`AISHA_AUTORUN=1`, `ai redo`, agent
+mode), destructive commands additionally require typing "YES" (not just Y):
+
+```bash
+ai redo
 # ⚠️  Risky command detected.
 # Type YES to execute (Ctrl+C to abort):
 ```
@@ -260,8 +333,28 @@ $ kubectl get pod
 error: the server doesn't have a resource type "pod"
 
 $ ai
-# AI analyzes the error and suggests:
-# "The resource type should be 'pods' (plural). Try: kubectl get pods"
+# Explains: the resource type should be "pods" (plural), then:
+# Suggested command:
+#   kubectl get pods
+#   ↳ placed in your input line — edit if needed, Enter to run
+```
+
+Auto-fix streams an explanation of the failure and then delivers the
+corrected command straight to your input line, ready to run. If a command was
+previously run through aisha, its captured output (`last_output.txt`) is
+attached as context.
+
+aisha can't see the output of commands you ran directly (the shell doesn't
+capture it). When the error message matters, use `ai rerun`: it re-runs your
+last command with output capture, and if it fails, diagnoses it with the full
+output attached:
+
+```bash
+$ ai rerun
+# Re-running to capture output:
+#   kubectl get pod
+# Execute this command? [Y/n]:
+# ... diagnosis with the actual error text, corrected command in your buffer
 ```
 
 ### Special Commands
@@ -269,6 +362,11 @@ $ ai
 **Redo last suggestion**:
 ```bash
 ai redo
+```
+
+**Re-run your last command with output capture, then diagnose**:
+```bash
+ai rerun
 ```
 
 **Explain last suggestion**:
@@ -284,7 +382,11 @@ ai --deep migrate database from postgres to mysql
 
 ## Safety Features
 
-- **Strict confirmation** (must type "YES") for risky operations:
+- **Review-before-run by default**: suggested commands are placed in your
+  editable input line, never executed behind your back — you are the final
+  safety layer
+- **Strict confirmation** (must type "YES") whenever aisha executes commands
+  itself (`AISHA_AUTORUN=1`, `ai redo`, agent mode) for risky operations:
   - `sudo` - privilege escalation
   - `rm` - all file deletion commands (including `-rf`, `-r`, etc.)
   - `dd`, `mkfs` - disk operations
@@ -305,9 +407,13 @@ ai --deep migrate database from postgres to mysql
 - **Risky commands**: Type anything except "YES" to abort
 - **Anytime**: Press `Ctrl+C` to abort immediately
 
-## Zsh Integration
+## Shell Integration
 
-When running in zsh, aisha enables two quality-of-life features:
+Tab completion for subcommands and flags (`redo`, `explain`, `/help`, `/tips`,
+`--deep`, `--agent`, `-n`, `-c`, ...) is registered in both zsh (requires
+`compinit`) and bash.
+
+When running in zsh, aisha enables two additional quality-of-life features:
 
 - **`setopt nonomatch`** — Glob characters (`?`, `*`) are passed literally instead of causing errors, so you can type `ai what?` without quoting.
 - **ZLE apostrophe widget** — A lightweight `accept-line` widget detects lines starting with `ai ` that contain `'` and replaces them with the visually identical Unicode right single quotation mark (`ʼ` U+02BC). This prevents the shell from interpreting the apostrophe as an unterminated single quote. Your history stays clean: `ai whatʼs cooking?`.
@@ -363,17 +469,20 @@ session directories from closed shells are pruned automatically.
 
 ## Customization
 
-All settings are environment variables with sensible defaults — export them in
-your shell rc file *before* the aisha loader to override, no script editing
-needed:
+All settings are environment variables with sensible defaults. The cleanest
+way to customize is the config file — plain shell assignments, read at load,
+survives updates:
 
 ```bash
-export AISHA_MODEL_TASK="llama3.3:70b"
-# Load AI shell helpers
-if [[ -f "$HOME/.aisha" ]]; then
-  source "$HOME/.aisha"
-fi
+# ~/.config/aisha/config
+AISHA_MODEL_TASK="llama3.3:70b"
+AISHA_AGENT_MAX_STEPS=25
+AISHA_AUTORUN=1        # classic confirm-and-run instead of buffer injection
+AISHA_STDIN_CONTEXT=0  # never read piped stdin as context
 ```
+
+Exporting the same variables before the aisha loader in your shell rc file
+works too (the config file takes precedence).
 
 ### Change the LLM Models
 ```bash

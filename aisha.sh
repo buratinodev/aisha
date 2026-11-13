@@ -7,37 +7,51 @@
 # ╚════════════════════════════════════════════════════════════════════════════╝
 #
 # Table of contents:
-#   1. Configuration          — colors, models, OS detection
+#   1. Configuration          — config file, colors, models, state dirs, OS
 #   2. Installer              — `./aisha.sh --install`
-#   3. Shared helpers         — prompts, risk detection, context capture
+#   3. Shared helpers         — prompts, risk detection, context, streaming
 #   4. Confirmation & exec    — confirm-and-run with risk gating
 #   5. Agent tools            — read_file, write_file, search, etc.
 #   6. Agent internals        — dispatcher, checkpoints, history, display
 #   7. Agent command executor — step execution with safety checks
 #   8. Agent loop             — _ai_agent() main loop
-#   9. Main entry point       — _ai() dispatcher + ai() alias
-#  10. Zsh integration        — nonomatch, ZLE apostrophe widget
+#   9. Help, tips & delivery  — /help, /tips, suggestion delivery modes
+#  10. Main entry point       — _ai() dispatcher + ai() alias
+#  11. Shell integration      — nonomatch, ZLE widget, completion
 
 
 # ============================================================================
 # 1. CONFIGURATION
 # ============================================================================
-# All knobs can be overridden from the environment before sourcing, e.g.
-#   export AISHA_MODEL_TASK="llama3.3:70b"
+# Every knob below can be overridden from the environment before sourcing,
+# e.g.  export AISHA_MODEL_TASK="llama3.3:70b"
+# or set in the config file (plain shell assignments), which takes precedence:
+#   ${XDG_CONFIG_HOME:-~/.config}/aisha/config
+
+AISHA_VERSION="0.2.0"
+
+# ---- User config file (optional) ----
+AISHA_CONFIG_FILE="${AISHA_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/aisha/config}"
+# shellcheck disable=SC1090
+[[ -r "$AISHA_CONFIG_FILE" ]] && source "$AISHA_CONFIG_FILE"
 
 # ---- Colors ----
-AISHA_COLOR_RED="\033[1;31m"
-AISHA_COLOR_GREEN="\033[1;32m"
-AISHA_COLOR_YELLOW="\033[1;33m"
-AISHA_COLOR_CYAN="\033[1;36m"
-AISHA_COLOR_DIM="\033[2m"
-AISHA_COLOR_BOLD="\033[1m"
-AISHA_COLOR_WHITE="\033[1;37m"
-AISHA_COLOR_RESET="\033[0m"
+AISHA_COLOR_RED="${AISHA_COLOR_RED-\033[1;31m}"
+AISHA_COLOR_GREEN="${AISHA_COLOR_GREEN-\033[1;32m}"
+AISHA_COLOR_YELLOW="${AISHA_COLOR_YELLOW-\033[1;33m}"
+AISHA_COLOR_CYAN="${AISHA_COLOR_CYAN-\033[1;36m}"
+AISHA_COLOR_DIM="${AISHA_COLOR_DIM-\033[2m}"
+AISHA_COLOR_BOLD="${AISHA_COLOR_BOLD-\033[1m}"
+AISHA_COLOR_WHITE="${AISHA_COLOR_WHITE-\033[1;37m}"
+AISHA_COLOR_RESET="${AISHA_COLOR_RESET-\033[0m}"
 
 # ---- Models ----
 AISHA_MODEL_TASK="${AISHA_MODEL_TASK:-qwen3-coder:30b}"   # Fast model for command suggestions & agent steps
 AISHA_MODEL_THINKING="${AISHA_MODEL_THINKING:-qwen3:32b}" # Reasoning model for deep analysis & explanations
+
+# ---- Behavior ----
+AISHA_AUTORUN="${AISHA_AUTORUN:-0}"             # 1 = legacy confirm-and-eval instead of buffer injection
+AISHA_STDIN_CONTEXT="${AISHA_STDIN_CONTEXT:-1}" # 0 = never read piped stdin as context
 
 # ---- Agent ----
 AISHA_AGENT_MAX_STEPS="${AISHA_AGENT_MAX_STEPS:-15}"
@@ -124,6 +138,47 @@ _ai_model_for() {
   [[ "$1" == "deep" ]] && echo "$AISHA_MODEL_THINKING" || echo "$AISHA_MODEL_TASK"
 }
 
+# llm with Python output buffering disabled, so tokens stream through the
+# markdown renderer as they are generated instead of arriving in one block.
+_ai_llm_stream() {
+  PYTHONUNBUFFERED=1 llm "$@"
+}
+
+# True when the current shell is interactive (a user is at the prompt).
+_ai_shell_interactive() {
+  if [[ -n "$ZSH_VERSION" ]]; then
+    [[ -o interactive ]]
+  else
+    [[ $- == *i* ]]
+  fi
+}
+
+# Put a command into the shell's editable input line so the user can review,
+# edit, and run it — and it lands in shell history naturally.
+# Returns 1 if no mechanism is available (caller falls back to confirm-and-run).
+_ai_inject_buffer() {
+  local cmd="$1"
+  if [[ -n "$ZSH_VERSION" ]]; then
+    print -rz -- "$cmd"
+    return 0
+  fi
+  if [[ -n "$BASH_VERSION" ]]; then
+    history -s "$cmd"
+    return 0
+  fi
+  return 1
+}
+
+# Transient "Thinking..." indicator (only when stdout is a terminal).
+_ai_thinking_start() {
+  [[ -t 1 ]] && echo -ne "${AISHA_COLOR_DIM}  ⏳ Thinking...${AISHA_COLOR_RESET}\r"
+  return 0
+}
+_ai_thinking_end() {
+  [[ -t 1 ]] && echo -ne "\033[2K\r"
+  return 0
+}
+
 # Create this session's state dir, point the "latest" symlink at it, and
 # prune state dirs left behind by shells that are no longer running.
 _ai_state_init() {
@@ -188,6 +243,10 @@ _ai_render_markdown() {
       [[ "$line" == *"</think>"* ]] && in_think=false
       continue
     fi
+
+    # Internal protocol marker (auto-fix corrected command) — handled by the
+    # caller, not for display
+    [[ "$line" == FIX:* ]] && continue
 
     # Code fence toggle
     if [[ "$line" =~ ^\`\`\` ]]; then
@@ -258,28 +317,52 @@ _ai_render_markdown() {
 # 4. CONFIRMATION & EXECUTION
 # ============================================================================
 
+# Read a confirmation reply into $_AISHA_REPLY. When piped stdin was already
+# consumed as context, read from the terminal instead. $_AISHA_REPLY_OK is
+# false when no reply could be read at all (EOF, no tty) so callers can
+# distinguish "pressed Enter" from "nobody there" and take the safe path.
+_ai_read_reply() {
+  _AISHA_REPLY=""
+  _AISHA_REPLY_OK=true
+  if [[ "$_AISHA_STDIN_CONSUMED" == true ]]; then
+    read -r _AISHA_REPLY < /dev/tty 2>/dev/null || _AISHA_REPLY_OK=false
+  else
+    read -r _AISHA_REPLY || _AISHA_REPLY_OK=false
+  fi
+}
+
 # Confirm a command with the user, then execute it.
 # Risky commands require typing "YES"; safe commands accept Y/n.
+# Sets $_AISHA_RUN_STATUS to "ran" or "aborted" so callers can tell a
+# declined command (exit 0) apart from one that ran successfully.
 _ai_confirm_and_run() {
   local cmd="$1"
+  local confirm
+  _AISHA_RUN_STATUS="aborted"
 
   if echo "$cmd" | grep -Eq "$_AISHA_RISKY_RE"; then
     echo -e "${AISHA_COLOR_RED}⚠️  Risky command detected.${AISHA_COLOR_RESET}"
     echo -n "Type YES to execute (Ctrl+C to abort): "
-    read -r confirm
+    _ai_read_reply; confirm="$_AISHA_REPLY"
     if [[ "$confirm" != "YES" ]]; then
       echo -e "${AISHA_COLOR_YELLOW}Aborted.${AISHA_COLOR_RESET}"
       return 0
     fi
   else
     echo -n -e "${AISHA_COLOR_GREEN}Execute this command? [Y/n]:${AISHA_COLOR_RESET} "
-    read -r confirm
-    confirm=${confirm:-Y}
+    _ai_read_reply
+    if [[ "$_AISHA_REPLY_OK" == true ]]; then
+      confirm="${_AISHA_REPLY:-Y}"   # plain Enter accepts
+    else
+      confirm="n"                    # EOF / no tty → abort
+    fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
       echo -e "${AISHA_COLOR_YELLOW}Aborted.${AISHA_COLOR_RESET}"
       return 0
     fi
   fi
+
+  _AISHA_RUN_STATUS="ran"
 
   # Force color output for common commands (restore any pre-existing value after)
   local prev_clicolor_force="${CLICOLOR_FORCE-__aisha_unset__}"
@@ -300,12 +383,10 @@ _ai_confirm_and_run() {
     exit_code=$?
   else
     eval "$cmd" 2>&1 | tee "$AISHA_SESSION_DIR/last_output.txt"
-    if [[ -n "$ZSH_VERSION" ]]; then
-      # shellcheck disable=SC2154  # pipestatus is zsh's lowercase PIPESTATUS
-      exit_code=${pipestatus[1]}
-    else
-      exit_code=${PIPESTATUS[0]}
-    fi
+    # Must be the first statement after the pipeline: even [[ ]] resets
+    # PIPESTATUS. bash fills PIPESTATUS[0]; zsh falls through to pipestatus[1].
+    # shellcheck disable=SC2154  # pipestatus is zsh's lowercase PIPESTATUS
+    exit_code="${PIPESTATUS[0]:-${pipestatus[1]}}"
   fi
 
   if [[ "$prev_clicolor_force" == "__aisha_unset__" ]]; then
@@ -803,7 +884,186 @@ _ai_agent() {
 
 
 # ============================================================================
-# 9. MAIN ENTRY POINT
+# 9. HELP, TIPS & SUGGESTION DELIVERY
+# ============================================================================
+
+_ai_help() {
+  _ai_render_markdown <<EOF
+# aisha $AISHA_VERSION — AI shell assistant
+
+**Usage:** ai [flags] <request in natural language>
+
+### Subcommands
+- \`ai redo\` — re-run the last suggested command
+- \`ai rerun\` — re-run your last command, capture its output, diagnose failures
+- \`ai explain\` — explain the last suggested command (thinking model)
+- \`ai /help\` — this help
+- \`ai /tips [topic]\` — power-user one-liners (curated, or generated for a topic)
+
+### Flags
+- \`--deep\` — use the thinking model for thorough analysis
+- \`-n, --no-exec\` — print the suggested command only (for scripts and pipes)
+- \`-c, --refine <feedback>\` — revise the last suggestion ("use ripgrep instead")
+- \`--agent <goal>\` — autonomous multi-step mode (\`--agent --resume\` to continue)
+- \`--agent-safe <goal>\` — agent mode, confirm every step
+- \`--version\` — print version
+
+### Piping
+- \`docker logs app 2>&1 | ai why is this crashing\` — piped input becomes context
+- \`ai -n list open ports | pbcopy\` — pipe the bare command anywhere
+
+### How suggestions run
+By default the suggested command is placed in your input line (zsh) or
+history (bash: press ↑) so you can edit it before running. Set
+\`AISHA_AUTORUN=1\` for the legacy confirm-and-run prompt. Risky commands
+(rm, sudo, dd, ...) always get a red warning.
+
+### Configuration
+Config file: \`$AISHA_CONFIG_FILE\` (plain shell assignments).
+Key knobs: \`AISHA_MODEL_TASK\`, \`AISHA_MODEL_THINKING\`, \`AISHA_AGENT_MAX_STEPS\`,
+\`AISHA_AUTORUN\`, \`AISHA_STDIN_CONTEXT\`.
+
+Bare \`ai\` right after a failed command diagnoses the failure.
+EOF
+}
+
+_ai_tips() {
+  # Topic mode: ask the task model for one-liners about the given topic
+  if [[ $# -gt 0 ]]; then
+    local topic="$*"
+    _ai_llm_stream -m "$AISHA_MODEL_TASK" \
+      "You are an expert Unix/Linux sysadmin. The user's OS is: $AISHA_OS
+Give exactly 5 practical, non-obvious shell one-liners about: $topic
+Format each as a markdown bullet: the command in backticks, then a dash and a one-sentence explanation.
+No preamble, no closing remarks." | _ai_render_markdown
+    return
+  fi
+
+  _ai_render_markdown <<'EOF'
+# aisha tips & tricks
+
+### Getting more out of aisha
+- `ai` — bare, right after a command fails: diagnoses it and puts a fix in your prompt
+- `ai rerun` — re-run your last command with output capture, then diagnose
+- `docker logs app 2>&1 | ai why is this crashing` — piped input becomes context
+- `ai -c use ripgrep instead` — refine the last suggestion
+- `ai -n list open ports | pbcopy` — print-only, pipe the command anywhere
+- `ai --deep ...` — thinking model for gnarly questions
+- `ai explain` — what the last suggestion does and its risks
+- `ai /tips awk` — five generated one-liners on any topic
+
+### Shell one-liners worth stealing
+- `cd -` — jump back to the previous directory
+- `sudo !!` — re-run the last command with sudo
+- `cp config.yml{,.bak}` — instant backup via brace expansion
+- `ctrl-r` — incremental history search; type a fragment, repeat to cycle
+- `sort | uniq -c | sort -rn` — frequency table of anything
+- `find . -name '*.log' -exec rm {} +` — batch exec with one process
+- `xargs -P4 -I{} cmd {}` — poor man's parallelism
+- `python3 -m http.server` — share the current directory on :8000
+- `lsof -i :3000` — who owns that port
+- `du -sh * | sort -h` — what's eating disk, sorted
+EOF
+}
+
+# Hand a suggested command to the user according to the active mode:
+#   -n flag                         → print the bare command
+#   AISHA_AUTORUN=1                 → legacy confirm-and-eval
+#   piped stdout / non-interactive  → print the bare command
+#   interactive zsh/bash            → inject into the editable input line
+_ai_deliver_suggestion() {
+  local response="$1" no_exec="${2:-false}"
+
+  echo "$response" > "$AISHA_SESSION_DIR/last_command.txt"
+
+  if [[ "$no_exec" == true ]]; then
+    echo "$response"
+    return 0
+  fi
+
+  if [[ "$AISHA_AUTORUN" == "1" ]]; then
+    echo
+    echo -e "${AISHA_COLOR_CYAN}Suggested command:${AISHA_COLOR_RESET}"
+    echo -e "  ${AISHA_COLOR_YELLOW}$response${AISHA_COLOR_RESET}"
+    echo
+    _ai_confirm_and_run "$response"
+    return $?
+  fi
+
+  # Pipe-friendly: `ai find big files | pbcopy` gets just the command
+  if [[ ! -t 1 ]] || ! _ai_shell_interactive; then
+    echo "$response"
+    return 0
+  fi
+
+  echo
+  echo -e "${AISHA_COLOR_CYAN}Suggested command:${AISHA_COLOR_RESET}"
+  echo -e "  ${AISHA_COLOR_YELLOW}$response${AISHA_COLOR_RESET}"
+  if echo "$response" | grep -Eq "$_AISHA_RISKY_RE"; then
+    echo -e "  ${AISHA_COLOR_RED}⚠️  Review carefully — this command can be destructive.${AISHA_COLOR_RESET}"
+  fi
+
+  if _ai_inject_buffer "$response"; then
+    if [[ -n "$ZSH_VERSION" ]]; then
+      echo -e "  ${AISHA_COLOR_DIM}↳ placed in your input line — edit if needed, Enter to run${AISHA_COLOR_RESET}"
+    else
+      echo -e "  ${AISHA_COLOR_DIM}↳ press ↑ to edit and run${AISHA_COLOR_RESET}"
+    fi
+    echo
+    return 0
+  fi
+
+  # No buffer mechanism available — fall back to confirm-and-run
+  echo
+  _ai_confirm_and_run "$response"
+}
+
+# Diagnose a failed command: stream an explanation, then extract the model's
+# corrected command (final "FIX: <cmd>" line) and deliver it like any other
+# suggestion. Attaches last_output.txt when a command was run through aisha.
+_ai_autofix() {
+  local exit_code="${1:-1}"
+  local tmpdir="$AISHA_SESSION_DIR"
+  local ctxdir="$tmpdir/last_context"
+
+  local -a out_ctx
+  out_ctx=()
+  [[ -s "$tmpdir/last_output.txt" ]] && out_ctx=(-f "$tmpdir/last_output.txt")
+
+  _ai_llm_stream -m "$AISHA_MODEL_THINKING" \
+    -f "$ctxdir/history.txt" \
+    -f "$ctxdir/pwd.txt" \
+    -f "$ctxdir/git.txt" \
+    -f "$ctxdir/exit.txt" \
+    "${out_ctx[@]}" \
+    "$(_ai_system_prompt deep)
+
+The user's last command failed (exit code $exit_code).
+history.txt holds the recent commands. If last_output.txt is attached, it is
+the captured output of the most recent command run through aisha — use it if
+it matches the failure.
+Explain briefly why the command failed and how to fix it.
+Then, if there is a clear corrected command, END your reply with exactly one
+final line in this form (no code fences, nothing after it):
+FIX: <the corrected command>
+If there is no single corrected command, omit the FIX line entirely." \
+    | tee "$tmpdir/autofix.txt" | _ai_render_markdown
+
+  local fix
+  fix=$(grep '^FIX:' "$tmpdir/autofix.txt" 2>/dev/null | tail -1)
+  rm -f "$tmpdir/autofix.txt"
+  fix="${fix#FIX:}"
+  fix="${fix#"${fix%%[![:space:]]*}"}"
+  fix="${fix%"${fix##*[![:space:]]}"}"
+  fix="${fix#\`}"; fix="${fix%\`}"
+
+  [[ -n "$fix" ]] && _ai_deliver_suggestion "$fix" false
+  return 0
+}
+
+
+# ============================================================================
+# 10. MAIN ENTRY POINT
 # ============================================================================
 
 # $1 is the exit code of the user's previous command, forwarded by ai()
@@ -815,6 +1075,24 @@ _ai() {
   _ai_state_init
   local tmpdir="$AISHA_SESSION_DIR"
   local ctxdir="$tmpdir/last_context"
+  _AISHA_STDIN_CONSUMED=false
+
+  # ---- Flags (order-independent, may precede the prompt) ----
+  local persona="sysadmin" no_exec=false refine=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --deep)          persona="deep"; shift ;;
+      -n|--no-exec)    no_exec=true; shift ;;
+      -c|--refine)     refine=true; shift ;;
+      -h|--help|/help) _ai_help; return 0 ;;
+      /tips)           shift; _ai_tips "$@"; return $? ;;
+      --version)       echo "aisha $AISHA_VERSION"; return 0 ;;
+      -agent|--agent)           shift; _ai_agent "auto" "$@"; return $? ;;
+      -agent-safe|--agent-safe) shift; _ai_agent "safe" "$@"; return $? ;;
+      --) shift; break ;;
+      *)  break ;;
+    esac
+  done
 
   # ---- Subcommand: redo ----
   if [[ "$1" == "redo" && $# -eq 1 ]]; then
@@ -830,13 +1108,41 @@ _ai() {
     return $?
   fi
 
+  # ---- Subcommand: rerun (re-run last history command, capture, diagnose) ----
+  if [[ "$1" == "rerun" && $# -eq 1 ]]; then
+    # Most recent history entry that doesn't invoke ai anywhere (also after
+    # |, ;, &&) — re-running an ai call would recurse.
+    local prev
+    prev=$(fc -ln -10 2>/dev/null | grep -vE '(^[[:space:]]*|[|;&][[:space:]]*)ai([[:space:]]|$)' | tail -1)
+    prev="${prev#"${prev%%[![:space:]]*}"}"
+    prev="${prev%"${prev##*[![:space:]]}"}"
+    if [[ -z "$prev" ]]; then
+      echo -e "${AISHA_COLOR_RED}No previous command found in history.${AISHA_COLOR_RESET}"
+      return 1
+    fi
+    echo -e "${AISHA_COLOR_CYAN}Re-running to capture output:${AISHA_COLOR_RESET}"
+    echo -e "  ${AISHA_COLOR_YELLOW}$prev${AISHA_COLOR_RESET}"
+    echo
+    local rerun_exit=0
+    _ai_confirm_and_run "$prev" || rerun_exit=$?
+    [[ "$_AISHA_RUN_STATUS" != "ran" ]] && return 0
+    if [[ $rerun_exit -ne 0 ]]; then
+      echo
+      _ai_capture_context "$ctxdir" "$rerun_exit"
+      _ai_autofix "$rerun_exit"
+    else
+      echo -e "${AISHA_COLOR_GREEN}✓ Command succeeded — nothing to fix.${AISHA_COLOR_RESET}"
+    fi
+    return 0
+  fi
+
   # ---- Subcommand: explain (bare only — "explain <question>" falls through) ----
   if [[ "$1" == "explain" && $# -eq 1 ]]; then
     if [[ ! -f "$tmpdir/last_command.txt" ]]; then
       echo -e "${AISHA_COLOR_RED}No previous AI suggestion to explain.${AISHA_COLOR_RESET}"
       return 1
     fi
-    llm -m "$AISHA_MODEL_THINKING" \
+    _ai_llm_stream -m "$AISHA_MODEL_THINKING" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
@@ -849,19 +1155,55 @@ The original user intent is in last_prompt.txt." | _ai_render_markdown
     return
   fi
 
-  # ---- Flag: --deep ----
-  local persona="sysadmin"
-  if [[ "$1" == "--deep" ]]; then
-    persona="deep"
-    shift
+  # ---- Piped stdin becomes context (capped at 64 KB) ----
+  local stdin_ctx=""
+  if [[ ! -t 0 && "$AISHA_STDIN_CONTEXT" == "1" ]]; then
+    head -c 65536 > "$ctxdir/stdin.txt" 2>/dev/null
+    _AISHA_STDIN_CONSUMED=true
+    if [[ -s "$ctxdir/stdin.txt" ]]; then
+      stdin_ctx="$ctxdir/stdin.txt"
+    else
+      rm -f "$ctxdir/stdin.txt"
+    fi
   fi
+  local -a extra_ctx
+  extra_ctx=()
+  [[ -n "$stdin_ctx" ]] && extra_ctx=(-f "$stdin_ctx")
 
-  # ---- Delegate to agent mode (accept -agent or --agent) ----
-  if [[ "$1" == "-agent" || "$1" == "--agent" ]]; then
-    shift; _ai_agent "auto" "$@"; return $?
-  fi
-  if [[ "$1" == "-agent-safe" || "$1" == "--agent-safe" ]]; then
-    shift; _ai_agent "safe" "$@"; return $?
+  # ---- Refinement: revise the previous suggestion with user feedback ----
+  if [[ "$refine" == true ]]; then
+    local feedback="$*"
+    if [[ -z "$feedback" ]]; then
+      echo -e "${AISHA_COLOR_RED}Usage: ai -c <feedback on the last suggestion>${AISHA_COLOR_RESET}"
+      return 1
+    fi
+    if [[ ! -f "$tmpdir/last_command.txt" || ! -f "$tmpdir/last_prompt.txt" ]]; then
+      echo -e "${AISHA_COLOR_RED}No previous suggestion to refine.${AISHA_COLOR_RESET}"
+      return 1
+    fi
+    _ai_capture_context "$ctxdir" "$last_exit"
+    _ai_thinking_start
+    local revised
+    revised=$(llm -m "$AISHA_MODEL_TASK" \
+      -f "$tmpdir/last_prompt.txt" \
+      -f "$tmpdir/last_command.txt" \
+      "${extra_ctx[@]}" \
+      "$(_ai_system_prompt sysadmin)
+
+last_prompt.txt is the user's original request; last_command.txt is the command you previously suggested.
+The user wants it revised: $feedback
+
+Output ONLY the revised shell command — no explanation, no code fences.")
+    _ai_thinking_end
+    revised=$(_ai_strip_response "$revised")
+    if [[ -z "$revised" ]]; then
+      echo -e "${AISHA_COLOR_YELLOW}No response available.${AISHA_COLOR_RESET}"
+      return 1
+    fi
+    # Append the feedback so further refinements see the whole conversation
+    printf '%s\nRefinement: %s\n' "$(cat "$tmpdir/last_prompt.txt")" "$feedback" > "$tmpdir/last_prompt.txt"
+    _ai_deliver_suggestion "$revised" "$no_exec"
+    return $?
   fi
 
   # ---- Build prompt ----
@@ -871,26 +1213,32 @@ The original user intent is in last_prompt.txt." | _ai_render_markdown
   # ---- Capture context ----
   _ai_capture_context "$ctxdir" "$last_exit"
 
-  # ---- Auto-fix: empty prompt + previous command failed ----
-  if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
-    llm -m "$AISHA_MODEL_THINKING" \
-      -f "$ctxdir/history.txt" \
+  # ---- Piped input with no prompt → diagnose the piped data ----
+  if [[ -z "$prompt" && -n "$stdin_ctx" ]]; then
+    _ai_llm_stream -m "$AISHA_MODEL_THINKING" \
+      -f "$stdin_ctx" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
-      -f "$ctxdir/exit.txt" \
       "$(_ai_system_prompt deep)
 
-The user's last command failed.
-Explain why it failed and suggest a fix.
-Do not execute commands." | _ai_render_markdown
+The user piped data into aisha (attached stdin.txt) without a question.
+Summarize what it shows and diagnose any errors or anomalies." | _ai_render_markdown
+    return
+  fi
+
+  # ---- Auto-fix: empty prompt + previous command failed ----
+  if [[ "$last_exit" -ne 0 && -z "$prompt" ]]; then
+    _ai_autofix "$last_exit"
     return
   fi
 
   # ---- Interactive fallback (e.g. if apostrophes broke argument parsing) ----
   if [[ -z "$prompt" ]]; then
     echo -n -e "${AISHA_COLOR_CYAN}Ask: ${AISHA_COLOR_RESET}"
-    read -r prompt
+    _ai_read_reply
+    prompt="$_AISHA_REPLY"
     [[ -z "$prompt" ]] && return 0
+    echo "$prompt" > "$tmpdir/last_prompt.txt"
   fi
 
   # Auto-select deep persona for explanation queries
@@ -903,25 +1251,28 @@ Do not execute commands." | _ai_render_markdown
 
   # ---- Explanation mode (how/why/what/explain/help) ----
   if [[ "$prompt" =~ ^(how|why|what|explain|help)([[:space:]]|$) ]]; then
-    llm -m "$model" \
+    _ai_llm_stream -m "$model" \
       -f "$ctxdir/history.txt" \
       -f "$ctxdir/pwd.txt" \
       -f "$ctxdir/git.txt" \
       -f "$tmpdir/last_prompt.txt" \
+      "${extra_ctx[@]}" \
       "$system_prompt
 
 Explain clearly and include one concrete command example to illustrate if applicable, but do NOT prompt the user to execute anything.
-The user's question is in the attached last_prompt.txt." | _ai_render_markdown
+The user's question is in the attached last_prompt.txt. If stdin.txt is attached, it is data the user piped in — treat it as the subject of the question." | _ai_render_markdown
     return
   fi
 
   # ---- Command suggestion mode ----
+  _ai_thinking_start
   local response
   response=$(llm -m "$model" \
     -f "$ctxdir/history.txt" \
     -f "$ctxdir/pwd.txt" \
     -f "$ctxdir/git.txt" \
     -f "$tmpdir/last_prompt.txt" \
+    "${extra_ctx[@]}" \
     "$system_prompt
 
 The user's request is in the attached last_prompt.txt.
@@ -930,8 +1281,10 @@ Rules:
 - If the request is a shell/system task, output ONLY the command (no explanation). Most requests are tasks.
 - ONLY if the request is clearly a greeting or chit-chat (like 'hello', 'what's up', 'how are you'), prefix your response with 'ANSWER:' followed by a brief, friendly reply
 - When in doubt, treat it as a task and output a command
+- If stdin.txt is attached, it is data the user piped in — treat it as the subject of the request
 - Never use rm -rf
 - Avoid destructive commands")
+  _ai_thinking_end
 
   response=$(_ai_strip_response "$response")
 
@@ -950,16 +1303,9 @@ Rules:
     return 0
   fi
 
-  # ---- Command suggestion — confirm and run ----
-  echo "$response" > "$tmpdir/last_command.txt"
+  # ---- Command suggestion — deliver per mode (inject/confirm/print) ----
   echo "$persona" > "$tmpdir/last_persona.txt"
-
-  echo
-  echo -e "${AISHA_COLOR_CYAN}Suggested command:${AISHA_COLOR_RESET}"
-  echo -e "  ${AISHA_COLOR_YELLOW}$response${AISHA_COLOR_RESET}"
-  echo
-
-  _ai_confirm_and_run "$response"
+  _ai_deliver_suggestion "$response" "$no_exec"
 }
 
 # Public alias. Capturing $? here, before any other command runs, is the only
@@ -968,8 +1314,10 @@ ai() { _ai "$?" "$@"; }
 
 
 # ============================================================================
-# 10. ZSH INTEGRATION
+# 11. SHELL INTEGRATION  (zsh ZLE + completion, bash completion)
 # ============================================================================
+
+_AISHA_COMPLETIONS="redo rerun explain /help /tips --deep --agent --agent-safe -n --no-exec -c --refine --help --version"
 
 if [[ -n "$ZSH_VERSION" ]]; then
   # Pass unmatched globs (?, *) literally instead of erroring
@@ -986,4 +1334,27 @@ if [[ -n "$ZSH_VERSION" ]]; then
     zle .accept-line
   }
   zle -N accept-line _ai_accept_line
+
+  # Completion: subcommands and flags in the first position only, so natural
+  # language prompts are left alone (requires compinit to be loaded).
+  _aisha_complete() {
+    # shellcheck disable=SC2154  # CURRENT is set by the zsh completion system
+    (( CURRENT == 2 )) || return 1
+    # shellcheck disable=SC2086  # word splitting is intended
+    compadd -- ${=_AISHA_COMPLETIONS}
+  }
+  command -v compdef >/dev/null 2>&1 && compdef _aisha_complete ai
+fi
+
+if [[ -n "$BASH_VERSION" ]]; then
+  _aisha_complete_bash() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=()
+    # Only offer completions for the first word or flag-like input
+    if [[ $COMP_CWORD -eq 1 || "$cur" == -* || "$cur" == /* ]]; then
+      while IFS= read -r c; do COMPREPLY+=("$c"); done \
+        < <(compgen -W "$_AISHA_COMPLETIONS" -- "$cur")
+    fi
+  }
+  complete -F _aisha_complete_bash ai 2>/dev/null
 fi

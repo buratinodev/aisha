@@ -1,14 +1,6 @@
 # aisha — Improvement Investigation & Implementation Plan
 
-Status: in progress — **Phase 1 complete (2026-11-13)** · Scope: `aisha.sh` (~950 lines), README
-
-**Committed next (user-requested), in addition to the phases below:**
-- Piping stdin as context (`docker logs app | ai why is this crashing`) — Phase 2, item 4
-- Refinement loop (`ai -c "use ripgrep instead"`) — Phase 2, item 5
-- Streaming output for explanation modes — pulled forward from Phase 5 into Phase 2, item 7
-- Shell completion (zsh + bash) — pulled forward from Phase 5 into Phase 2, item 8
-- `ai /help` — usage/flags/subcommands reference — Phase 2, item 9
-- `ai /tips` — curated power-user one-liners (tips & tricks) — Phase 2, item 10
+Status: in progress — **Phases 1 and 2 complete (2026-11-13)** · Scope: `aisha.sh`, README
 
 This document captures a code-level audit of aisha and a phased plan to fix the
 weaknesses and close the gap to what a power user expects from a shell AI
@@ -174,7 +166,28 @@ symlink and dead-session pruning; `CLICOLOR_FORCE` preserved; shellcheck clean
 **Exit criteria**: shellcheck clean, bats green in CI, bare `ai` behaves
 correctly inside and outside git repos.
 
-### Phase 2 — Execution model & core UX (the power-user payoff)
+### Phase 2 — Execution model & core UX ✅ DONE (2026-11-13)
+
+Shipped: buffer injection as the default execution model (`print -z` in zsh,
+`history -s` in bash; `AISHA_AUTORUN=1` for legacy confirm-and-eval; bare
+command when stdout is piped or the shell is non-interactive); order-free flag
+parser with `--help`/`--version`; `ai -n/--no-exec`; piped stdin as context
+(64 KB cap, `/dev/tty` fallback for prompts, `AISHA_STDIN_CONTEXT=0` to
+disable, bare-pipe auto-diagnosis); `ai -c/--refine` with chained feedback;
+config file at `~/.config/aisha/config`; streaming via `PYTHONUNBUFFERED=1`
+for all explanation modes; zsh+bash completion; `ai /help`; `ai /tips [topic]`
+(curated list instant, topic mode via task model). The confirm-prompt
+e(dit)/x(plain) sub-options from item 5 were dropped: buffer injection makes
+editing the default.
+
+Follow-up additions (same day): auto-fix now attaches `last_output.txt` when
+present and ends by extracting the model's `FIX:` line and delivering the
+corrected command to the input buffer; `ai rerun` (pulled forward from Phase
+5) re-runs the last history command with output capture and diagnoses
+failures. Along the way a long-standing bug surfaced: `_ai_confirm_and_run`
+read `PIPESTATUS[0]` *after* a `[[ ]]` test had already reset it, so executed
+commands always reported exit code 1 in bash — fixed by capturing immediately
+after the pipeline. Test suite: 31.
 
 1. **Buffer injection instead of eval** (finding #4): on accept, place the
    suggested command into the editing buffer (`print -z` / `READLINE_LINE`;
@@ -212,33 +225,54 @@ correctly inside and outside git repos.
 no special-casing; `$(ai -n "…")` usable in scripts; README rewritten around
 the new flow.
 
-### Phase 3 — Safety hardening
+### Phase 3 — Architecture split: thin shim + Python core
 
-1. Rework `_AI_RISKY_RE`: match after separators (`;`, `|`, `&&`, `$(`,
-   backtick), add patterns (`git push --force`, `chmod -R 777`, `truncate`,
-   `curl|wget … | sh`, `> /dev/…`), and split into levels (warn vs. require
-   YES) (finding #5).
-2. User-configurable `AISHA_RISKY_PATTERNS` / `AISHA_ALLOW_PATTERNS` in the
-   config file.
-3. Replace first-line truncation with fenced-block extraction and prompt the
-   model for a single fenced block; support multi-line suggestions end to end
-   (finding #6).
-4. Document the safety model honestly in the README: heuristics, not a
+The shell implementation has hit its ceiling: ad-hoc parsing, string-built
+JSON, sed pipelines per rendered line, and quoting hazards in every `eval`.
+The target architecture:
+
+- **A thin sourced shim (~150 lines of shell)** that owns only the
+  shell-integration surface — the things a child process cannot do:
+  - capture `$?` at `ai()` entry
+  - dump shell history (`fc`) and hand off cwd/session identity
+  - invoke the core, passing interactivity flags and inheriting stdin/tty
+  - inject the returned command into the input buffer (`print -z` /
+    `history -s`)
+  - ZLE widget, `nonomatch`, tab completion registration
+- **A Python core** that does everything else: flag parsing, context
+  assembly, llm calls, markdown rendering, risk engine, state management,
+  confirm-and-run, and the agent loop.
+
+Python is the pragmatic core choice: `llm` is already a Python dependency and
+`python3` is already a soft requirement, so this adds zero install burden.
+The core shells out to the `llm` CLI (keeps model config, plugins, and the
+test stub working unchanged).
+
+The former safety-hardening and agent-robustness phases land naturally as
+part of the port, where they are easy instead of painful:
+
+1. Risk engine: match risky patterns after separators (`;`, `|`, `&&`,
+   `$(`), add missing patterns (`git push --force`, `chmod -R 777`,
+   `curl … | sh`), warn/confirm levels, user-configurable allow/deny lists
+   (finding #5).
+2. Multi-line suggestions: fenced-block extraction instead of first-line
+   truncation (finding #6).
+3. Agent: real JSON checkpoints and robust tool-call parsing (finding #7),
+   byte-budgeted step history instead of `head -5`, enforced tool gating
+   (`AISHA_AGENT_TOOLS`), honest `--resume` (restore cwd), `web_fetch` with
+   byte caps.
+4. Markdown renderer in Python: one pass, no subprocesses per line.
+5. Document the safety model honestly in the README: heuristics, not a
    sandbox; the user reviewing the buffer is the real safety layer.
 
-### Phase 4 — Agent robustness
-
-1. Replace comma-split tool parsing with a heredoc or JSON protocol; parse
-   with `python3`/`jq` (finding #7). Write checkpoints as real JSON.
-2. Feed the agent fuller step output (budgeted by bytes, not `head -5`), and
-   separate stdout/stderr so errors are visible to the model.
-3. Apply the Phase 3 risk engine to agent steps; add
-   `AISHA_AGENT_DENY="write_file,command"`-style tool gating (the
-   `AI_AGENT_TOOLS` variable exists today but is never enforced).
-4. Honest `--resume`: restore working directory from the checkpoint and show
-   the last step's summary before continuing.
-5. Improve `web_fetch`: strip HTML to text when `python3` is available, set a
-   byte cap, surface HTTP status.
+**Open discussion — single-file install:** it would be nice to keep a
+"one file, one `--install`" story (like a Node install script). Options:
+(a) ship two files, installer copies both — simplest, current direction;
+(b) embed the Python core in the shim as a heredoc that self-extracts to
+`~/.local/share/aisha/core.py` on load — true single file, but adds a build
+step or careful escaping maintenance; (c) installer downloads the core from
+the repo — adds a network dependency. Decide once the core stabilizes;
+(a) is the default until then.
 
 ### Phase 5 — Polish
 
@@ -247,8 +281,7 @@ the new flow.
 3. Rework the zsh apostrophe widget to wrap (not replace) the existing
    `accept-line` widget, or retire it in favor of the Ask fallback
    (finding #10).
-4. `ai rerun` (re-run last history command, capture output, diagnose) as the
-   practical answer to finding #12.
+4. ~~`ai rerun`~~ → shipped early with the Phase 2 follow-ups (finding #12).
 5. Installer: version stamp in the installed file, `--install` upgrades in
    place, `--uninstall` removes the rc-file block.
 
@@ -256,6 +289,4 @@ the new flow.
 
 ## Next up
 
-Phase 2, starting with the buffer-injection execution model (item 1) and the
-flag parser (item 2), since stdin context, refinement, streaming, completion,
-`/help`, and `/tips` all hang off those two.
+Phase 3: the shim + Python core split described above.

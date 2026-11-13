@@ -105,10 +105,67 @@ teardown() {
   [[ "$output" != *"failed"* ]]
 }
 
-# ---- suggestion flow ---------------------------------------------------------
+# ---- auto-fix with output context and delivered fix ---------------------------
 
-@test "suggestion flow: shows command, uses task model, aborts on n" {
+@test "auto-fix attaches last_output.txt and delivers the corrected command" {
+  export AISHA_TEST_LLM_RESPONSE=$'The resource type is plural.\nFIX: kubectl get pods'
+  run bash -c '
+    source "$AISHA_SH"
+    _ai_state_init
+    printf "error: unknown resource pod" > "$AISHA_SESSION_DIR/last_output.txt"
+    false; ai < /dev/null
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"plural"* ]]
+  [[ "$output" == *"kubectl get pods"* ]]
+  [[ "$output" != *"FIX:"* ]]
+  grep -q "last_output.txt" "$AISHA_TEST_LLM_LOG"
+  [ "$(cat "$XDG_STATE_HOME/aisha/latest/last_command.txt")" = "kubectl get pods" ]
+}
+
+@test "auto-fix without a FIX line delivers nothing" {
+  export AISHA_TEST_LLM_RESPONSE="There is no simple fix for this."
+  run bash -c 'source "$AISHA_SH"; false; ai < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no simple fix"* ]]
+  [ ! -f "$XDG_STATE_HOME/aisha/latest/last_command.txt" ]
+}
+
+@test "ai rerun re-runs the last history command and diagnoses the failure" {
+  export AISHA_TEST_LLM_RESPONSE=$'That file does not exist.\nFIX: ls /tmp'
+  run bash -c '
+    # enable the history list but not recording, so only the seeded entry
+    # (and the set +o line) are visible to fc
+    set -o history; set +o history
+    history -s "cat /nonexistent-aisha-test-file"
+    source "$AISHA_SH"
+    printf "y\n" | ai rerun
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Re-running"* ]]
+  [[ "$output" == *"cat /nonexistent-aisha-test-file"* ]]
+  [[ "$output" == *"does not exist"* ]]
+  [[ "$output" == *"ls /tmp"* ]]
+  grep -q "last_output.txt" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "ai rerun reports success without diagnosing" {
+  run bash -c '
+    set -o history; set +o history
+    history -s "true"
+    source "$AISHA_SH"
+    printf "y\n" | ai rerun
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nothing to fix"* ]]
+  [ ! -s "$AISHA_TEST_LLM_LOG" ]
+}
+
+# ---- suggestion flow (legacy confirm-and-run via AISHA_AUTORUN=1) ------------
+
+@test "autorun suggestion flow: shows command, uses task model, aborts on n" {
   export AISHA_TEST_LLM_RESPONSE="ls -la"
+  export AISHA_AUTORUN=1 AISHA_STDIN_CONTEXT=0
   run bash -c 'source "$AISHA_SH"; printf "n\n" | ai list all files'
   [ "$status" -eq 0 ]
   [[ "$output" == *"Suggested command"* ]]
@@ -117,8 +174,9 @@ teardown() {
   grep -q "task-model" "$AISHA_TEST_LLM_LOG"
 }
 
-@test "risky suggestion requires YES and aborts otherwise" {
+@test "autorun risky suggestion requires YES and aborts otherwise" {
   export AISHA_TEST_LLM_RESPONSE="rm old.txt"
+  export AISHA_AUTORUN=1 AISHA_STDIN_CONTEXT=0
   run bash -c 'source "$AISHA_SH"; printf "no\n" | ai delete the old file'
   [ "$status" -eq 0 ]
   [[ "$output" == *"Risky command detected"* ]]
@@ -127,10 +185,101 @@ teardown() {
 
 @test "suggestion is saved to the session state dir (latest symlink)" {
   export AISHA_TEST_LLM_RESPONSE="ls -la"
-  bash -c 'source "$AISHA_SH"; printf "n\n" | ai list all files' > /dev/null
+  bash -c 'source "$AISHA_SH"; ai -n list all files < /dev/null' > /dev/null
   [ -L "$XDG_STATE_HOME/aisha/latest" ]
   [ -f "$XDG_STATE_HOME/aisha/latest/last_command.txt" ]
   [ "$(cat "$XDG_STATE_HOME/aisha/latest/last_command.txt")" = "ls -la" ]
+}
+
+# ---- Phase 2: non-interactive mode, piping, refine, help/tips ----------------
+
+@test "ai -n prints only the bare command" {
+  export AISHA_TEST_LLM_RESPONSE="df -h"
+  run bash -c 'source "$AISHA_SH"; ai -n show disk usage < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$output" = "df -h" ]
+}
+
+@test "non-interactive suggestion prints the command without executing" {
+  export AISHA_TEST_LLM_RESPONSE="ls -la"
+  run bash -c 'source "$AISHA_SH"; printf "some data" | ai list files'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ls -la"* ]]
+  [[ "$output" != *"Execute this command"* ]]
+}
+
+@test "piped stdin is attached as context for questions" {
+  export AISHA_TEST_LLM_RESPONSE="the connection was refused"
+  run bash -c 'source "$AISHA_SH"; printf "ERROR: connection refused" | ai why did this fail'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the connection was refused"* ]]
+  grep -q "stdin.txt" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "piped stdin with no prompt is diagnosed with the thinking model" {
+  export AISHA_TEST_LLM_RESPONSE="this log shows a crash"
+  run bash -c 'source "$AISHA_SH"; printf "segfault at 0x0" | ai'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"this log shows a crash"* ]]
+  grep -q "stdin.txt" "$AISHA_TEST_LLM_LOG"
+  grep -q "think-model" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "ai -c refines the previous suggestion" {
+  run bash -c '
+    source "$AISHA_SH"
+    export AISHA_TEST_LLM_RESPONSE="ls -la"
+    ai -n list all files < /dev/null
+    export AISHA_TEST_LLM_RESPONSE="ls -lah"
+    ai -n -c use human readable sizes < /dev/null
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ls -lah"* ]]
+  grep -q "last_command.txt" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "ai -c without a previous suggestion reports an error" {
+  run bash -c 'source "$AISHA_SH"; ai -c use ripgrep instead < /dev/null'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"No previous suggestion to refine"* ]]
+}
+
+@test "ai /help prints usage" {
+  run bash -c 'source "$AISHA_SH"; ai /help < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Usage:"* ]]
+  [[ "$output" == *"/tips"* ]]
+}
+
+@test "ai --version prints the version" {
+  run bash -c 'source "$AISHA_SH"; ai --version < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == aisha* ]]
+}
+
+@test "ai /tips shows curated one-liners without calling the model" {
+  run bash -c 'source "$AISHA_SH"; ai /tips < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tips & tricks"* ]]
+  [[ "$output" == *"brace expansion"* ]]
+  [ ! -s "$AISHA_TEST_LLM_LOG" ]
+}
+
+@test "ai /tips <topic> asks the task model for one-liners" {
+  export AISHA_TEST_LLM_RESPONSE="- \`docker system prune\` - free space"
+  run bash -c 'source "$AISHA_SH"; ai /tips docker < /dev/null'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"docker system prune"* ]]
+  grep -q "docker" "$AISHA_TEST_LLM_LOG"
+  grep -q "task-model" "$AISHA_TEST_LLM_LOG"
+}
+
+@test "flags compose in any order (--deep -n)" {
+  export AISHA_TEST_LLM_RESPONSE="lsof -i :443"
+  run bash -c 'source "$AISHA_SH"; ai -n --deep check what uses port 443 < /dev/null'
+  [ "$status" -eq 0 ]
+  [ "$output" = "lsof -i :443" ]
+  grep -q "think-model" "$AISHA_TEST_LLM_LOG"
 }
 
 # ---- ANSWER: path ------------------------------------------------------------
