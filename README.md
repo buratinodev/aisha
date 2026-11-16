@@ -60,7 +60,7 @@ Perfect for:
 ### One-Command Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/buratinodev/aisha/main/install.sh | bash
+curl -fsSL https://github.com/buratinodev/aisha/releases/latest/download/install.sh | bash
 ```
 
 ### From a Clone
@@ -95,7 +95,7 @@ source ~/.zshrc  # or source ~/.bashrc for bash users
 
 ```bash
 ai --upgrade
-# Checking https://raw.githubusercontent.com/buratinodev/aisha/main for updates...
+# Checking https://github.com/buratinodev/aisha/releases/latest/download for updates...
 # Upgrading aisha 0.5.0 → 0.6.0
 # Also upgrade the llm-ollama plugin? [Y/n]:
 # Also update the model gemma4:e4b-mlx (ollama pull)? [Y/n]:
@@ -105,6 +105,23 @@ Downloads the latest release, installs it with its own installer (never
 downgrades), then offers to update the `llm-ollama` plugin and pull the
 latest build of your configured model. From a clone, `git pull &&
 ./aisha.sh --install` does the same for aisha itself.
+
+Installs and upgrades come from the latest
+[GitHub release](https://github.com/buratinodev/aisha/releases), not the
+`main` branch, so unreleased work never reaches users. To track `main`
+anyway:
+
+```bash
+AISHA_REPO_RAW=https://raw.githubusercontent.com/buratinodev/aisha/main ai --upgrade
+```
+
+### Releasing (maintainers)
+
+1. Bump `VERSION` in `aisha_core.py`, commit, push.
+2. `make release` — tags `v<VERSION>` and pushes the tag.
+3. The Release workflow checks the tag matches `VERSION`, runs lint and
+   tests, and publishes a GitHub release with generated notes and
+   `aisha.sh`, `aisha_core.py`, `install.sh` attached.
 
 ### Uninstall
 

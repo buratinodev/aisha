@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -1876,11 +1876,13 @@ def _version_tuple(v):
     return tuple(int(x) for x in re.findall(r'\d+', v or "0"))
 
 
-REPO_RAW = "https://raw.githubusercontent.com/buratinodev/aisha/main"
+# Assets of the latest GitHub release (GitHub redirects to the newest tag).
+# AISHA_REPO_RAW overrides it, e.g. the raw main-branch URL to track main.
+REPO_RAW = "https://github.com/buratinodev/aisha/releases/latest/download"
 
 
 def cmd_upgrade():
-    """Fetch the latest shim + core and install them with the new installer,
+    """Fetch the latest released shim + core and install them with the new installer,
     then offer to refresh the llm-ollama plugin and the configured model."""
     import tempfile
     import urllib.request

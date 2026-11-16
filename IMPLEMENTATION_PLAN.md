@@ -428,6 +428,15 @@ test HOME and two config tests failed only on Linux; the bats setup now pins
 so every built-in is a `--flag` and anything else is a prompt. `AISHA_SELF`
 now points the model at `ai --config set`.
 
+**0.6.11 — GitHub releases:** pushing a `v*` tag runs
+`.github/workflows/release.yml`: tag must equal `VERSION`, lint + tests,
+then `gh release create --generate-notes` with `aisha.sh`, `aisha_core.py`
+and `install.sh` attached. `make release` tags `v<VERSION>` (refuses on a
+dirty tree, an existing tag, or HEAD ≠ origin/main) and pushes it.
+`ai --upgrade` and `install.sh` now download from
+`releases/latest/download` instead of `main`, so unreleased commits never
+reach users; `AISHA_REPO_RAW` can still point at the raw `main` URL.
+
 ---
 
 ## Decisions log

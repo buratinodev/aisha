@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # aisha one-command installer:
-#   curl -fsSL https://raw.githubusercontent.com/buratinodev/aisha/main/install.sh | bash
+#   curl -fsSL https://github.com/buratinodev/aisha/releases/latest/download/install.sh | bash
 #
 # Downloads the shim and the Python core, then runs the real installer
 # (which checks dependencies and offers to install llm / ollama).
 set -euo pipefail
 
-REPO_RAW="${AISHA_REPO_RAW:-https://raw.githubusercontent.com/buratinodev/aisha/main}"
+# Latest GitHub release; set AISHA_REPO_RAW to the raw main-branch URL to
+# install unreleased code instead.
+REPO_RAW="${AISHA_REPO_RAW:-https://github.com/buratinodev/aisha/releases/latest/download}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
