@@ -6,6 +6,8 @@ setup() {
   TEST_TMP="$(mktemp -d)"
   export HOME="$TEST_TMP/home"
   export XDG_STATE_HOME="$TEST_TMP/state"
+  # CI runners set XDG_CONFIG_HOME; keep the config file inside the test HOME
+  export XDG_CONFIG_HOME="$HOME/.config"
   mkdir -p "$HOME"
 
   export AISHA_SH="$BATS_TEST_DIRNAME/../aisha.sh"
@@ -268,11 +270,20 @@ teardown() {
   [[ "$output" == *"No previous suggestion to refine"* ]]
 }
 
-@test "ai /help prints usage" {
-  run bash -c 'source "$AISHA_SH"; ai /help < /dev/null'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Usage:"* ]]
-  [[ "$output" == *"/tips"* ]]
+@test "ai --help and -h print usage" {
+  for flag in --help -h; do
+    run bash -c "source \"\$AISHA_SH\"; ai $flag < /dev/null"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage:"* ]]
+    [[ "$output" == *"--tips"* ]]
+  done
+}
+
+@test "ai /help is no longer a subcommand (goes to the model)" {
+  export AISHA_TEST_LLM_RESPONSE="echo hi"
+  run bash -c 'source "$AISHA_SH"; ai -n /help < /dev/null'
+  [[ "$output" != *"Usage:"* ]]
+  [ -s "$AISHA_TEST_LLM_LOG" ]
 }
 
 @test "ai --version prints the version" {
@@ -281,17 +292,17 @@ teardown() {
   [[ "$output" == aisha* ]]
 }
 
-@test "ai /tips shows curated one-liners without calling the model" {
-  run bash -c 'source "$AISHA_SH"; ai /tips < /dev/null'
+@test "ai --tips shows curated one-liners without calling the model" {
+  run bash -c 'source "$AISHA_SH"; ai --tips < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" == *"tips & tricks"* ]]
   [[ "$output" == *"brace expansion"* ]]
   [ ! -s "$AISHA_TEST_LLM_LOG" ]
 }
 
-@test "ai /tips <topic> asks the model for one-liners without thinking" {
+@test "ai --tips <topic> asks the model for one-liners without thinking" {
   export AISHA_TEST_LLM_RESPONSE="- \`docker system prune\` - free space"
-  run bash -c 'source "$AISHA_SH"; ai /tips docker < /dev/null'
+  run bash -c 'source "$AISHA_SH"; ai --tips docker < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" == *"docker system prune"* ]]
   grep -q "docker" "$AISHA_TEST_LLM_LOG"

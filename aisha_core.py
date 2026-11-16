@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.8"
+VERSION = "0.6.9"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -1152,8 +1152,6 @@ def cmd_help():
 - `ai explain` — explain the last suggested command
 - `ai /config [show|set KEY VALUE|unset KEY|edit|path]` — view or change settings
 - `ai /selftest [model]` — score a model on sed/awk/grep config tasks with known answers
-- `ai /help` — this help
-- `ai /tips [topic]` — power-user one-liners (curated, or generated for a topic)
 
 ### Flags
 - `--deep` — thorough analysis (deep persona, thinking on)
@@ -1162,6 +1160,8 @@ def cmd_help():
 - `-c, --refine <feedback>` — revise the last suggestion ("use ripgrep instead")
 - `--agent <goal>` — multi-step mode: shows a plan, runs it after your OK (`--agent --resume` to continue)
 - `--agent-safe <goal>` — agent mode, confirm every step
+- `-h, --help` — this help
+- `--tips [topic]` — power-user one-liners (curated, or generated for a topic)
 - `--version` — print version
 - `--install` / `--uninstall` — install or remove aisha
 - `--upgrade` — fetch and install the latest aisha; offers to update the plugin and model
@@ -1200,7 +1200,7 @@ CURATED_TIPS = """# aisha tips & tricks
 - `ai -n list open ports | pbcopy` — print-only, pipe the command anywhere
 - `ai --deep ...` — deep persona with thinking for gnarly questions
 - `ai explain` — what the last suggestion does and its risks
-- `ai /tips awk` — five generated one-liners on any topic
+- `ai --tips awk` — five generated one-liners on any topic
 
 ### Shell one-liners worth stealing
 - `cd -` — jump back to the previous directory
@@ -2094,9 +2094,9 @@ def main(argv):
             json_mode = True
         elif a in ("-c", "--refine"):
             refine = True
-        elif a in ("-h", "--help", "/help"):
+        elif a in ("-h", "--help"):
             return cmd_help()
-        elif a == "/tips":
+        elif a == "--tips":
             return cmd_tips(argv[1:])
         elif a == "--version":
             out(f"aisha {VERSION}")

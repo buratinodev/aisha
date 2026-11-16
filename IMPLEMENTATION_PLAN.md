@@ -415,6 +415,14 @@ python/ssh, …) are refused with a hint at the batch form (`top -l 1 -o cpu
 -n 10`), and the plan/step prompts state that commands run without a
 terminal (sudo can't prompt). README gained a screenshot. Test suite: 68.
 
+**0.6.9 — unix-style help flags, CI fix:** `ai /help` and `ai /tips` became
+`ai --help` / `-h` and `ai --tips [topic]` (the slash forms are gone and now
+reach the model like any other prompt). CI had been red since Phase 6: the
+GitHub runner sets `XDG_CONFIG_HOME`, so `/config set` wrote outside the
+test HOME and two config tests failed only on Linux; the bats setup now pins
+`XDG_CONFIG_HOME` inside the test HOME. `actions/checkout` bumped to v5
+(Node 20 deprecation). Test suite: 69.
+
 ---
 
 ## Decisions log

@@ -37,7 +37,7 @@ Perfect for:
 - **Refinement**: `ai -c "use ripgrep instead"` revises the last suggestion
 - **Script-friendly**: `ai -n <request>` prints just the command — usable in `$( )`, pipes, `pbcopy`
 - **Streaming answers**: explanations render as they are generated
-- **Built-in help & tips**: `ai /help` and `ai /tips [topic]`
+- **Built-in help & tips**: `ai --help` (`-h`) and `ai --tips [topic]`
 - **Tab completion** for subcommands and flags (zsh and bash)
 - **Config file**: `~/.config/aisha/config` — no script editing needed
 - **Colorized Output**: Preserves colors in ls, grep, diff, and tree commands
@@ -275,9 +275,9 @@ ai --json delete old logs | jq -r 'select(.risky | not).command'
 ### Help and Tips
 
 ```bash
-ai /help         # usage, flags, configuration reference
-ai /tips         # curated power-user one-liners (instant, no model call)
-ai /tips awk     # five model-generated one-liners about any topic
+ai --help        # usage (also -h), flags, configuration reference
+ai --tips        # curated power-user one-liners (instant, no model call)
+ai --tips awk    # five model-generated one-liners about any topic
 ai --version
 ```
 
@@ -561,7 +561,7 @@ ai --deep migrate database from postgres to mysql
 ## Shell Integration
 
 Tab completion for subcommands and flags (`redo`, `explain`, `/config`,
-`/selftest`, `/help`, `/tips`, `--deep`, `--agent`, `-n`, `-c`, ...) is
+`/selftest`, `--help`, `--tips`, `--deep`, `--agent`, `-n`, `-c`, ...) is
 registered in both zsh (requires `compinit`) and bash.
 
 When running in zsh, aisha enables two additional quality-of-life features:
@@ -669,7 +669,7 @@ AISHA_REVIEW=1                 # second-pass review of sensitive commands
 | `--deep` | on |
 | Agent steps | on |
 | how/why/what/explain questions, `ai explain` | off (answers stream immediately) |
-| `ai /tips <topic>` | off |
+| `ai --tips <topic>` | off |
 
 Thinking is on wherever a command may end up being run: correctness over
 speed. `AISHA_MODEL_TASK` / `AISHA_MODEL_THINKING` from earlier versions are
