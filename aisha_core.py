@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.6.9"
+VERSION = "0.6.10"
 
 # ============================================================================
 # Configuration  (precedence: config file > environment > defaults)
@@ -92,7 +92,7 @@ def cfg(name):
 def warn_legacy():
     if any(k in CFG for k in LEGACY_KEYS):
         sys.stderr.write(f"{YELLOW}aisha: AISHA_MODEL_TASK/AISHA_MODEL_THINKING are no longer "
-                         f"used; set one model with: ai /config set AISHA_MODEL <name>{RESET}\n")
+                         f"used; set one model with: ai --config set AISHA_MODEL <name>{RESET}\n")
 
 
 # ---- Colors (overridable via AISHA_COLOR_*; values may use \033 escapes) ----
@@ -627,7 +627,7 @@ AGENT_EXEC_NOTE = (
 
 AISHA_SELF = (
     "About aisha itself (the assistant you are part of): its settings are changed ONLY with "
-    "`ai /config set KEY VALUE` (e.g. `ai /config set AISHA_MODEL qwen3.5:9b-mlx`); "
+    "`ai --config set KEY VALUE` (e.g. `ai --config set AISHA_MODEL qwen3.5:9b-mlx`); "
     "keys: AISHA_MODEL, AISHA_THINK, AISHA_REVIEW, AISHA_AUTORUN, AISHA_STDIN_CONTEXT, "
     "AISHA_AGENT_MAX_STEPS, AISHA_AGENT_PLAN, AISHA_RISKY_EXTRA, AISHA_RISKY_ALLOW. "
     "Never edit ~/.aisha or ~/.aisha-core.py — those files are the program, not config.")
@@ -891,7 +891,7 @@ Output ONLY the revised shell command — no explanation, no code fences.""")
 
 
 # ============================================================================
-# /config
+# --config
 # ============================================================================
 
 CONFIG_CHOICES = {
@@ -931,7 +931,7 @@ def write_config_file(path, key, value):
 def cmd_config(args):
     path = cfg("AISHA_CONFIG_FILE")
     sub = args[0] if args else "show"
-    usage = "Usage: ai /config [show | path | edit | set KEY VALUE | unset KEY]"
+    usage = "Usage: ai --config [show | path | edit | set KEY VALUE | unset KEY]"
 
     if sub == "path":
         out(path)
@@ -947,7 +947,7 @@ def cmd_config(args):
         legacy = [k for k in LEGACY_KEYS if k in CFG]
         if legacy:
             out(f"{YELLOW}  Unused legacy keys: {', '.join(legacy)} — "
-                f"remove with: ai /config unset <KEY>{RESET}")
+                f"remove with: ai --config unset <KEY>{RESET}")
         return 0
 
     if sub == "edit":
@@ -984,7 +984,7 @@ def cmd_config(args):
 
 
 # ============================================================================
-# /selftest — known prompts, known outcomes, run against the installed model
+# --selftest — known prompts, known outcomes, run against the installed model
 # ============================================================================
 
 SUGGEST_RULES = f"""The user's request is in the attached last_prompt.txt.
@@ -1150,8 +1150,6 @@ def cmd_help():
 - `ai redo` — re-run the last suggested command
 - `ai rerun` — re-run your last command, capture its output, diagnose failures
 - `ai explain` — explain the last suggested command
-- `ai /config [show|set KEY VALUE|unset KEY|edit|path]` — view or change settings
-- `ai /selftest [model]` — score a model on sed/awk/grep config tasks with known answers
 
 ### Flags
 - `--deep` — thorough analysis (deep persona, thinking on)
@@ -1160,6 +1158,8 @@ def cmd_help():
 - `-c, --refine <feedback>` — revise the last suggestion ("use ripgrep instead")
 - `--agent <goal>` — multi-step mode: shows a plan, runs it after your OK (`--agent --resume` to continue)
 - `--agent-safe <goal>` — agent mode, confirm every step
+- `--config [show|set KEY VALUE|unset KEY|edit|path]` — view or change settings
+- `--selftest [model]` — score a model on sed/awk/grep config tasks with known answers
 - `-h, --help` — this help
 - `--tips [topic]` — power-user one-liners (curated, or generated for a topic)
 - `--version` — print version
@@ -1180,7 +1180,7 @@ reviewed by a second thinking pass first; if it finds a problem and a safer
 command, the safer one is what you get (`AISHA_REVIEW=0` disables).
 
 ### Configuration
-Config file: `{cfg('AISHA_CONFIG_FILE')}` — change it with `ai /config set`.
+Config file: `{cfg('AISHA_CONFIG_FILE')}` — change it with `ai --config set`.
 One model (`AISHA_MODEL`) serves every mode; modes differ in prompt and
 thinking (`AISHA_THINK=auto|on|off`). Other knobs: `AISHA_REVIEW`,
 `AISHA_AGENT_MAX_STEPS`, `AISHA_AUTORUN`, `AISHA_STDIN_CONTEXT`,
@@ -1828,7 +1828,7 @@ def check_dependencies():
         out("")
         out(f"{DIM}Pull the default model (one model serves every mode):{RESET}")
         out(f"{DIM}  ollama pull {DEFAULTS['AISHA_MODEL']}{RESET}")
-        out(f"{DIM}  Another model: ai /config set AISHA_MODEL <name>  (see README){RESET}")
+        out(f"{DIM}  Another model: ai --config set AISHA_MODEL <name>  (see README){RESET}")
 
 
 def cmd_install(shim_path):
@@ -2069,11 +2069,11 @@ def main(argv):
         return cmd_install(shim)
     if argv[:1] == ["--uninstall"]:
         return cmd_uninstall()
-    if argv[:1] in (["--upgrade"], ["/upgrade"]):
+    if argv[:1] == ["--upgrade"]:
         return cmd_upgrade()
-    if argv[:1] == ["/config"]:
+    if argv[:1] == ["--config"]:
         return cmd_config(argv[1:])
-    if argv[:1] == ["/selftest"]:
+    if argv[:1] == ["--selftest"]:
         return cmd_selftest(argv[1:])
 
     warn_legacy()

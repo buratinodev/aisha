@@ -48,9 +48,9 @@ Perfect for:
 - **Second-opinion review**: risky and config/system-file-editing commands
   (`sed -i`, redirects into dotfiles or `/etc`, `chmod`, ...) get a thinking
   review pass before they reach you; a safer alternative replaces a flawed one
-- **`ai /selftest`**: score your installed model on sed/awk/grep config tasks
+- **`ai --selftest`**: score your installed model on sed/awk/grep config tasks
   with known answers
-- **`ai /config`**: view and change settings without hand-editing files
+- **`ai --config`**: view and change settings without hand-editing files
 - **Dual Personas**:
   - **sysadmin** (default): Concise, practical suggestions
   - **deep**: Step-by-step reasoning with edge case analysis (auto-selected for how/why/what/explain queries)
@@ -164,8 +164,8 @@ You need the `llm` CLI tool with a configured model:
 
    To use another model:
    ```bash
-   ai /config set AISHA_MODEL qwen3.5:9b-mlx
-   ai /selftest                  # check how it does on known tasks
+   ai --config set AISHA_MODEL qwen3.5:9b-mlx
+   ai --selftest                  # check how it does on known tasks
    ```
    Bigger machines can run a larger model the same way (e.g.
    `gemma4:26b-mlx`, MoE with 4B active parameters, or `qwen3.6:35b-mlx`).
@@ -281,26 +281,26 @@ ai --tips awk    # five model-generated one-liners about any topic
 ai --version
 ```
 
-### Settings: `ai /config`
+### Settings: `ai --config`
 
 ```bash
-ai /config                              # effective settings and where each comes from
-ai /config set AISHA_MODEL qwen3.5:9b-mlx
-ai /config set think off                # AISHA_ prefix optional, case-insensitive
-ai /config unset AISHA_THINK
-ai /config edit                         # open in $VISUAL / $EDITOR
+ai --config                              # effective settings and where each comes from
+ai --config set AISHA_MODEL qwen3.5:9b-mlx
+ai --config set think off                # AISHA_ prefix optional, case-insensitive
+ai --config unset AISHA_THINK
+ai --config edit                         # open in $VISUAL / $EDITOR
 ```
 
 Unknown keys and invalid values are rejected; the file is rewritten
 atomically and other lines are kept. The model also knows this command —
-`ai set qwen3.5:9b-mlx as my model` suggests `ai /config set ...` instead of
+`ai set qwen3.5:9b-mlx as my model` suggests `ai --config set ...` instead of
 hand-editing files.
 
-### Model self-test: `ai /selftest`
+### Model self-test: `ai --selftest`
 
 ```bash
-ai /selftest                  # the configured model
-ai /selftest qwen3.5:9b-mlx   # any installed model, without switching
+ai --selftest                  # the configured model
+ai --selftest qwen3.5:9b-mlx   # any installed model, without switching
 ```
 
 Eleven fixed tasks on config-style files — in-place `sed` edits (including
@@ -369,7 +369,7 @@ ai change a to b in my zshrc
 
 When the review finds a problem and offers a safer command, the safer one is
 what lands in your input line (the original is shown). `--json` output
-includes a `review` object. Disable with `ai /config set AISHA_REVIEW 0`.
+includes a `review` object. Disable with `ai --config set AISHA_REVIEW 0`.
 The reviewer is the same model — a second look, not a guarantee.
 
 ### Explanation Mode
@@ -407,7 +407,7 @@ Read-only steps are white, steps that change things are yellow, risky ones
 red with ⚠️ (aisha marks these itself rather than trusting the model). The
 agent follows the approved plan and stops with FAILED instead of taking a
 changing action the plan doesn't cover. Risky steps still require typing
-YES during execution. Skip planning with `ai /config set AISHA_AGENT_PLAN 0`.
+YES during execution. Skip planning with `ai --config set AISHA_AGENT_PLAN 0`.
 
 The agent sees your recent shell history (not its output), so "the above
 containers" resolves to your last `docker ps -a` — it re-runs read-only
@@ -560,8 +560,8 @@ ai --deep migrate database from postgres to mysql
 
 ## Shell Integration
 
-Tab completion for subcommands and flags (`redo`, `explain`, `/config`,
-`/selftest`, `--help`, `--tips`, `--deep`, `--agent`, `-n`, `-c`, ...) is
+Tab completion for subcommands and flags (`redo`, `explain`, `--config`,
+`--selftest`, `--help`, `--tips`, `--deep`, `--agent`, `-n`, `-c`, ...) is
 registered in both zsh (requires `compinit`) and bash.
 
 When running in zsh, aisha enables two additional quality-of-life features:
@@ -640,7 +640,7 @@ session directories from closed shells are pruned automatically.
 ## Customization
 
 All settings are environment variables with sensible defaults. The cleanest
-way to customize is `ai /config set` (or the config file it writes — plain
+way to customize is `ai --config set` (or the config file it writes — plain
 shell assignments, read at load, survives updates):
 
 ```bash

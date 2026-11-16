@@ -423,6 +423,11 @@ test HOME and two config tests failed only on Linux; the bats setup now pins
 `XDG_CONFIG_HOME` inside the test HOME. `actions/checkout` bumped to v5
 (Node 20 deprecation). Test suite: 69.
 
+**0.6.10 — all built-ins are flags:** `ai /config` and `ai /selftest` became
+`ai --config` and `ai --selftest` (the hidden `/upgrade` alias is gone too),
+so every built-in is a `--flag` and anything else is a prompt. `AISHA_SELF`
+now points the model at `ai --config set`.
+
 ---
 
 ## Decisions log

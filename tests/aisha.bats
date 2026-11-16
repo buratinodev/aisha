@@ -88,20 +88,20 @@ teardown() {
 # ---- subcommand routing ----------------------------------------------------
 
 @test "ai redo with no prior suggestion reports an error" {
-  run bash -c 'source "$AISHA_SH"; ai redo'
+  run bash -c 'source "$AISHA_SH"; ai redo < /dev/null'
   [ "$status" -eq 1 ]
   [[ "$output" == *"No previous AI suggestion"* ]]
 }
 
 @test "ai explain (bare) with no prior suggestion reports an error" {
-  run bash -c 'source "$AISHA_SH"; ai explain'
+  run bash -c 'source "$AISHA_SH"; ai explain < /dev/null'
   [ "$status" -eq 1 ]
   [[ "$output" == *"No previous AI suggestion"* ]]
 }
 
 @test "ai explain <question> is answered, not treated as the explain subcommand" {
   export AISHA_TEST_LLM_RESPONSE="cron runs scheduled jobs"
-  run bash -c 'source "$AISHA_SH"; ai explain what cron does'
+  run bash -c 'source "$AISHA_SH"; ai explain what cron does < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" != *"No previous AI suggestion"* ]]
   [[ "$output" == *"cron runs scheduled jobs"* ]]
@@ -111,7 +111,7 @@ teardown() {
 
 @test "bare ai after a failing command triggers auto-fix with thinking on" {
   export AISHA_TEST_LLM_RESPONSE="diagnosis: command not found"
-  run bash -c 'source "$AISHA_SH"; false; ai'
+  run bash -c 'source "$AISHA_SH"; false; ai < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" == *"diagnosis: command not found"* ]]
   grep -q -- "-m test-model -o think true" "$AISHA_TEST_LLM_LOG"
@@ -380,20 +380,20 @@ PY
   [ "$(grep -c ARGS "$AISHA_TEST_LLM_LOG")" -eq 1 ]
 }
 
-# ---- /config ---------------------------------------------------------------------
+# ---- --config ---------------------------------------------------------------------
 
-@test "ai /config set writes the config file and the core reads it" {
-  run bash -c 'source "$AISHA_SH"; ai /config set model qwen3.5:9b-mlx < /dev/null'
+@test "ai --config set writes the config file and the core reads it" {
+  run bash -c 'source "$AISHA_SH"; ai --config set model qwen3.5:9b-mlx < /dev/null'
   [ "$status" -eq 0 ]
   grep -q "^AISHA_MODEL=qwen3.5:9b-mlx$" "$HOME/.config/aisha/config"
-  run bash -c 'source "$AISHA_SH"; ai /config show < /dev/null'
+  run bash -c 'source "$AISHA_SH"; ai --config show < /dev/null'
   [[ "$output" == *"AISHA_MODEL=qwen3.5:9b-mlx"*"(config)"* ]]
 }
 
-@test "ai /config set replaces existing lines and keeps others" {
+@test "ai --config set replaces existing lines and keeps others" {
   mkdir -p "$HOME/.config/aisha"
   printf '# mine\nAISHA_MODEL=a\nAISHA_AUTORUN=1\n' > "$HOME/.config/aisha/config"
-  run bash -c 'source "$AISHA_SH"; ai /config set AISHA_MODEL b < /dev/null'
+  run bash -c 'source "$AISHA_SH"; ai --config set AISHA_MODEL b < /dev/null'
   [ "$status" -eq 0 ]
   [ "$(grep -c '^AISHA_MODEL=' "$HOME/.config/aisha/config")" -eq 1 ]
   grep -q "^AISHA_MODEL=b$" "$HOME/.config/aisha/config"
@@ -401,33 +401,33 @@ PY
   grep -q "^AISHA_AUTORUN=1$" "$HOME/.config/aisha/config"
 }
 
-@test "ai /config rejects unknown keys and invalid values" {
-  run bash -c 'source "$AISHA_SH"; ai /config set bogus 1 < /dev/null'
+@test "ai --config rejects unknown keys and invalid values" {
+  run bash -c 'source "$AISHA_SH"; ai --config set bogus 1 < /dev/null'
   [ "$status" -eq 1 ]
   [[ "$output" == *"Unknown setting"* ]]
-  run bash -c 'source "$AISHA_SH"; ai /config set think maybe < /dev/null'
+  run bash -c 'source "$AISHA_SH"; ai --config set think maybe < /dev/null'
   [ "$status" -eq 1 ]
   [ ! -f "$HOME/.config/aisha/config" ]
 }
 
-@test "suggestion prompts tell the model to use ai /config" {
-  export AISHA_TEST_LLM_RESPONSE="ai /config set AISHA_MODEL x"
+@test "suggestion prompts tell the model to use ai --config" {
+  export AISHA_TEST_LLM_RESPONSE="ai --config set AISHA_MODEL x"
   run bash -c 'source "$AISHA_SH"; ai -n set x as my model < /dev/null'
-  grep -q "ai /config set KEY VALUE" "$AISHA_TEST_LLM_LOG"
+  grep -q "ai --config set KEY VALUE" "$AISHA_TEST_LLM_LOG"
 }
 
-# ---- /selftest -------------------------------------------------------------------
+# ---- --selftest -------------------------------------------------------------------
 
-@test "ai /selftest --reference: every case's reference answer passes" {
-  run bash -c 'source "$AISHA_SH"; ai /selftest --reference < /dev/null'
+@test "ai --selftest --reference: every case's reference answer passes" {
+  run bash -c 'source "$AISHA_SH"; ai --selftest --reference < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" == *"11/11 passed"* ]]
   [ ! -s "$AISHA_TEST_LLM_LOG" ]
 }
 
-@test "ai /selftest scores model answers and shows failures" {
+@test "ai --selftest scores model answers and shows failures" {
   export AISHA_TEST_LLM_RESPONSE="echo wrong"
-  run bash -c 'source "$AISHA_SH"; ai /selftest some-model < /dev/null'
+  run bash -c 'source "$AISHA_SH"; ai --selftest some-model < /dev/null'
   [ "$status" -eq 1 ]
   [[ "$output" == *"some-model"* ]]
   [[ "$output" == *"0/11 passed"* ]]
@@ -454,9 +454,9 @@ PY
   [[ "$output" == *"9.9.9 is up to date"* ]]
 }
 
-@test "ai /selftest never runs risky commands" {
+@test "ai --selftest never runs risky commands" {
   export AISHA_TEST_LLM_RESPONSE="rm -r conf"
-  run bash -c 'source "$AISHA_SH"; ai /selftest < /dev/null'
+  run bash -c 'source "$AISHA_SH"; ai --selftest < /dev/null'
   [ "$status" -eq 1 ]
   [[ "$output" == *"flagged risky"* ]]
 }
@@ -465,7 +465,7 @@ PY
 
 @test "ANSWER: responses are shown directly without a confirm prompt" {
   export AISHA_TEST_LLM_RESPONSE="ANSWER: doing great, thanks"
-  run bash -c 'source "$AISHA_SH"; ai hows it going'
+  run bash -c 'source "$AISHA_SH"; ai hows it going < /dev/null'
   [ "$status" -eq 0 ]
   [[ "$output" == *"doing great, thanks"* ]]
   [[ "$output" != *"Execute this command"* ]]

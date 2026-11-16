@@ -149,7 +149,7 @@ ai() {
 # Shell integration  (zsh ZLE + completion, bash completion)
 # ============================================================================
 
-_AISHA_COMPLETIONS="redo rerun explain /config /selftest --tips --deep --agent --agent-safe -n --no-exec -c --refine --json -h --help --version --install --upgrade --uninstall"
+_AISHA_COMPLETIONS="redo rerun explain --config --selftest --tips --deep --agent --agent-safe -n --no-exec -c --refine --json -h --help --version --install --upgrade --uninstall"
 
 if [[ -n "$ZSH_VERSION" ]]; then
   # Pass unmatched globs (?, *) literally instead of erroring
